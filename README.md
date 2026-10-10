@@ -20,6 +20,13 @@ const DTEngine = require("./engine/dt_engine.js");
 const r = await DTEngine.investigate(tx, allTxs, DTEngine.defaults(), async (msg, kind) => console.log(msg), 0);
 ```
 
+## Pattern detection and reconciliation (engine functions)
+- `DTEngine.patterns(txs, cases)` -> bank/switch failure clusters and customers flagged for refund abuse.
+- `DTEngine.parseSettlement(csvText)` -> rows from an end-of-day settlement CSV (header: ref, session, amount, status).
+- `DTEngine.reconcile(rows, txs)` -> ghost debits, status mismatches, amount mismatches, missing records. Reports only; the caller applies fixes.
+- `DTEngine.sampleSettlement(txs)` -> a fake settlement CSV for demos (uses the demo-only `tx.sim`).
+The staff screens that use these (Patterns tab, Reconciliation tab) belong to the accountant side.
+
 ## Customer notifications
 Each case stage writes an SMS-style and an email-style message to the `notifications` collection; customers read them in the in-app inbox.
 These are in-app only. A real deployment would send them through an SMS gateway and an email service.

@@ -61,6 +61,39 @@ const explain=(f,c)=>[...FEATS.map(k=>({k,v:(f||{})[k]||0,w:c.w[k],c:c.w[k]*((f|
 const conf=p=>Math.max(p,1-p);
 const sla=(cs,now=Date.now())=>cs.status!=='awaiting'||!cs.slaDue?{state:'none'}:now>cs.slaDue?{state:'overdue',mins:Math.ceil((now-cs.slaDue)/6e4)}:{state:'ok',mins:Math.ceil((cs.slaDue-now)/6e4)};
 const evaluate=(ex,c)=>{if(!ex.length)return null;let ok=0,L=0;for(const x of ex){const p=Math.min(1-1e-6,Math.max(1e-6,score(x.f||{},c)));if((p>=.5)===(x.y===1))ok++;L-=x.y===1?Math.log(p):Math.log(1-p)}return{n:ex.length,acc:ok/ex.length,loss:L/ex.length}};
+/* PATTERNS(txs,cases,opts?) -> {banks:[{bank,total,failed,rate,flagged}], customers:[{uid,name,disputes,falseClaims,falseRate,refunds,flagged,reason}]}
+   txs=[{id,uid,rb,status,caseId}], cases=[{txid,uid,uname,type,status,verdict}]. A transfer counts as failed if it is failed/refunded now OR was auto-flagged (auto-correction later turns it Successful).
+   opts defaults: minTx 3, bankRate .4 (flag a bank at 40% failures), minDisputes 3, falseRate .5 (flag a customer when half their disputes were verified delivered / not debited), minRefunds 3. */
+const patterns=(txs,cases,o={})=>{const O={minTx:3,bankRate:.4,minDisputes:3,falseRate:.5,minRefunds:3,...o},cs={};cases.forEach(c=>cs[c.txid]=c);
+ const failed=t=>t.status==='failed'||t.status==='refunded'||(cs[t.id]&&cs[t.id].type==='auto'),B={};
+ txs.forEach(t=>{const b=B[t.rb]=B[t.rb]||{bank:t.rb,total:0,failed:0};b.total++;if(failed(t))b.failed++});
+ const banks=Object.values(B).map(b=>({...b,rate:b.failed/b.total,flagged:b.total>=O.minTx&&b.failed/b.total>=O.bankRate})).sort((a,b)=>b.rate-a.rate||b.total-a.total);
+ const U={};cases.forEach(c=>{const u=U[c.uid]=U[c.uid]||{uid:c.uid,name:c.uname,disputes:0,falseClaims:0,refunds:0};if(c.type==='customer'){u.disputes++;if(c.verdict==='auto_success'||c.verdict==='no_debit')u.falseClaims++}if(c.status==='refunded')u.refunds++});
+ const customers=Object.values(U).map(u=>{const fr=u.disputes?u.falseClaims/u.disputes:0,r=[];if(u.disputes>=O.minDisputes&&fr>=O.falseRate)r.push(u.falseClaims+' of '+u.disputes+' disputes were verified as delivered or not debited');if(u.refunds>=O.minRefunds)r.push(u.refunds+' refunds approved');return{...u,falseRate:fr,flagged:r.length>0,reason:r.join('; ')}}).sort((a,b)=>(b.flagged-a.flagged)||b.falseClaims-a.falseClaims);
+ return{banks,customers}};
+/* PARSESETTLEMENT(csvText) -> [{ref,sess,amount,status}] with status normalised to SUCCESS | FAILED | REVERSED | UNKNOWN.
+   Header row required. Accepted column names: ref/reference/transactionid/txid, session/sessionid, amount/amt, status/state. */
+const parseSettlement=text=>{const lines=String(text).split(String.fromCharCode(10)).map(l=>l.trim()).filter(Boolean);if(lines.length<2)return[];
+ const sp=l=>{const o=[];let c='',q=false;for(const ch of l){if(ch==='"')q=!q;else if(ch===','&&!q){o.push(c.trim());c=''}else c+=ch}o.push(c.trim());return o};
+ const H=sp(lines[0]).map(h=>h.toLowerCase().replace(/[^a-z]/g,'')),ix=(...n)=>H.findIndex(h=>n.includes(h)),ri=ix('ref','reference','transactionid','txid'),si=ix('session','sessionid'),ai=ix('amount','amt'),ti=ix('status','state');
+ const norm=v=>{v=String(v||'').toUpperCase();return /SUCC|APPROV|^00$/.test(v)?'SUCCESS':/REVERS/.test(v)?'REVERSED':/FAIL|DECLIN|REJECT/.test(v)?'FAILED':'UNKNOWN'};
+ return lines.slice(1).map(l=>{const c=sp(l);return{ref:ri>=0?c[ri]:'',sess:si>=0?c[si]:'',amount:ai>=0?+String(c[ai]).replace(/[^0-9.-]/g,''):NaN,status:norm(ti>=0?c[ti]:'')}})};
+/* RECONCILE(rows,txs) -> {summary:{rows,matched,issues,byKind,unreported}, issues:[{kind,ref,txid,uid,amount,reported,detail,action}]}
+   rows = parseSettlement() output (what the switch settled), txs = our ledger. kind: ghost_debit | reversal_not_applied | status_mismatch | amount_mismatch | refunded_but_settled | missing_in_ledger.
+   reported = a case already exists for it. action: open_case | review_case | correct_to_success | investigate. Reports only; the caller decides what to apply. */
+const reconcile=(rows,txs)=>{const byRef={},bySess={};txs.forEach(t=>{byRef[t.ref]=t;bySess[t.sess]=t});const seen=new Set(),I=[];let matched=0;
+ const add=(kind,t,r,detail,action)=>I.push({kind,ref:(t&&t.ref)||(r&&r.ref)||'',txid:t?t.id:null,uid:t?t.uid:null,amount:t?t.amt:(r&&r.amount),reported:!!(t&&t.caseId),detail,action});
+ rows.forEach(r=>{const t=byRef[r.ref]||bySess[r.sess];if(!t){if(r.status==='SUCCESS')add('missing_in_ledger',null,r,'Settled by the switch but there is no internal record','investigate');return}
+  seen.add(t.id);
+  if(!isNaN(r.amount)&&Math.abs(r.amount-t.amt)>.005)add('amount_mismatch',t,r,'Settlement '+r.amount+' vs ledger '+t.amt,'investigate');
+  else if(r.status==='SUCCESS'&&t.status==='failed')add('status_mismatch',t,r,'Settled as SUCCESS but our status is FAILED'+(t.debited?' and the customer was debited':''),'correct_to_success');
+  else if(r.status==='SUCCESS'&&t.status==='refunded')add('refunded_but_settled',t,r,'Customer was refunded but the transfer settled as SUCCESS','investigate');
+  else if((r.status==='FAILED'||r.status==='REVERSED')&&t.debited&&t.status!=='refunded')add(r.status==='REVERSED'?'reversal_not_applied':'ghost_debit',t,r,'Settlement says '+r.status+' but the customer was debited and not refunded',t.caseId?'review_case':'open_case');
+  else matched++});
+ txs.forEach(t=>{if(seen.has(t.id))return;if(t.debited&&t.status==='failed')add('ghost_debit',t,null,'Debited and failed with no settlement entry',t.caseId?'review_case':'open_case')});
+ const by={};I.forEach(i=>by[i.kind]=(by[i.kind]||0)+1);return{summary:{rows:rows.length,matched,issues:I.length,byKind:by,unreported:I.filter(i=>!i.reported&&i.uid).length},issues:I}};
+/* SAMPLESETTLEMENT(txs) -> CSV text for demos: builds a fake end-of-day file from tx.sim (demo-only, a real bank supplies the real file). */
+const sampleSettlement=txs=>['ref,session,amount,status',...txs.filter(t=>t.sim!=='unclear').map(t=>[t.ref,t.sess,t.amt,t.sim==='ok'||t.sim==='mismatch'?'SUCCESS':'FAILED'].join(','))].join(String.fromCharCode(10));
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function investigate(tx,all,cfg,log,delay=550,ad=adapters){
  const L=async(m,k)=>{await log(m,k);await wait(delay)};
@@ -81,7 +114,7 @@ function train(ex,cfg,epochs=300,lr=.3){const c=JSON.parse(JSON.stringify(cfg));
  const P=defaults(),lam=.02;/* L2 pull towards the defaults so a few decisions cannot send weights to extremes */
  for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}
  c.before=evaluate(ex,cfg);c.metrics=evaluate(ex,c);c.version++;c.trainedOn=ex.length;return c}
-return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,investigate,train}})();
+return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,patterns,parseSettlement,reconcile,sampleSettlement,investigate,train}})();
 </script>
 
 <script>
