@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Demo Bank – Refund Resolution</title>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>RefundGuard · AI refund resolution demo</title>
 <!--
 DATA CONTRACT (shared db; customer + accountant routes of this one artifact)
 Routes: (no hash)=customer app · #accountant=staff portal. Each route owns its own <script id="side-..."> style section below.
@@ -30,7 +30,7 @@ input,select{width:100%;padding:9px;border:1px solid var(--bd);border-radius:8px
 .note{background:var(--bg);padding:10px;border-radius:8px;color:var(--mu);font-size:12px;margin:8px 0}.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--tx);color:var(--bg);padding:10px 16px;border-radius:10px;z-index:9;max-width:90%}
 .modal{position:fixed;inset:0;background:#0008;display:flex;align-items:center;justify-content:center;z-index:8;padding:14px}.modal>div{background:var(--card);border-radius:14px;padding:16px;max-width:560px;width:100%;max-height:90%;overflow:auto}
 </style></head><body>
-<div class="top"><div class="logo" id="lg">Demo Bank</div><span id="who" class="hint"></span></div><div class="wrap" id="app">Loading…</div><div id="mod"></div>
+<div class="top"><div class="logo" id="lg">RefundGuard <small style="color:var(--mu);font-weight:500">· AI refund resolution demo</small></div><span id="who" class="hint"></span></div><div class="wrap" id="app">Loading…</div><div id="mod"></div>
 
 <script id="dt-engine">
 /* ===== DT ENGINE v1 — dependency-free refund-resolution engine =====
@@ -119,7 +119,7 @@ return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,patterns,parseSet
 
 <script>
 const $=s=>document.querySelector(s),N=n=>'₦'+Number(n).toLocaleString('en-NG',{minimumFractionDigits:2}),D=t=>new Date(t).toLocaleString('en-NG',{month:'short',day:'2-digit',year:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit'}),rid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,5);
-const BANK='Demo Bank'; /* <- change the bank's name here */
+const BANK='RefundGuard'; /* <- change the product name here */
 const clean=v=>String(v||'').replace(/[<>&`\\]/g,'').replace(/'/g,'’').replace(/"/g,'”').trim().slice(0,60);
 const STAFF=location.hash==='#accountant';let db,user,uid,S={users:[],txs:[],cases:[],examples:[],audit:[]},CFG=DTEngine.defaults(),tab='dash',cur=null,tx=null,busy=false,canW=null,LD={},ib=null,seenN=null;
 const toast=m=>{const e=document.createElement('div');e.className='toast';e.textContent=m;document.body.appendChild(e);setTimeout(()=>e.remove(),3000)};
@@ -131,7 +131,7 @@ const hold=e=>{if(e&&e.code==='revoked')toast('Access to the shared data was wit
 const watch=(n,q)=>(q||db.collection(n)).onSnapshot(s=>{S[n]=s.docs.map(d=>({id:d.id,...d.data()}));if(!s.metadata.fromCache)LD[n]=1;R()},hold);
 const watchMe=()=>db.doc('users/'+uid).onSnapshot(s=>{S.users=s.exists?[{id:uid,...s.data()}]:[];if(!s.metadata.fromCache)LD.users=1;R()},hold);
 async function boot(){
- $('#lg').textContent=STAFF?BANK+' · Staff portal':BANK;
+ $('#lg').innerHTML=BANK+' <small style="color:var(--mu);font-weight:500">· '+(STAFF?'Staff portal':'AI refund resolution demo')+'</small>';
  const cl=window.claude&&await claude.use('db');user=window.claude&&await claude.use('user');
  if(!cl||!user){$('#app').innerHTML='<div class="card">Please open this page signed in to claude.ai (as a Contributor on the artifact) so shared data can load.</div>';return}
  db=cl;uid=await user.id();
