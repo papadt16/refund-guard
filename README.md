@@ -44,3 +44,6 @@ Dashboard, Cases, Transactions, Customers, Patterns, Reconciliation, DT Engine, 
 Runs as a claude.ai Artifact (uses its `db`, `user` and `downloads` capabilities); viewers must be signed in as Contributors.
 Not a standalone web page: the db layer would need replacing to host elsewhere.
 The engine export downloads as `dt_engine.js.txt` (the download feature does not allow `.js`); rename it to `dt_engine.js`.
+
+## Server mode
+The web build runs DT Engine and all money movement on the server (`api/rg.js`); the browser only reads. See `SETUP.md`. Tests: `node test/server_test.js`.

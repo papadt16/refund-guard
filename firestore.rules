@@ -1,32 +1,22 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Clients can only READ. All writes (balances, transfers, cases, refunds, engine settings) happen on the server via the Admin SDK, which bypasses these rules.
     function signedIn() { return request.auth != null; }
-    // keep this list identical to STAFF_EMAILS in firebase-config.js
+    // keep identical to STAFF_EMAILS in firebase-config.js and the STAFF_EMAILS env var on Vercel
     function staff() { return signedIn() && request.auth.token.email in ['accountant@example.com']; }
     function mine() { return signedIn() && resource.data.uid == request.auth.uid; }
-    function minenew() { return signedIn() && request.resource.data.uid == request.auth.uid; }
 
-    match /users/{id} { allow read, write: if staff() || (signedIn() && request.auth.uid == id); }
-    match /txs/{id} {
-      allow read: if staff() || mine();
-      allow create: if staff() || minenew();
-      allow update: if staff() || (mine() && minenew());
-      allow delete: if staff();
-    }
-    match /cases/{id} {
-      allow read: if staff() || mine();
-      allow create: if staff() || minenew();
-      allow update: if staff() || (mine() && minenew());
-      allow delete: if staff();
-    }
+    match /users/{id}         { allow read: if staff() || (signedIn() && request.auth.uid == id); allow write: if false; }
+    match /txs/{id}           { allow read: if staff() || mine(); allow write: if false; }
+    match /cases/{id}         { allow read: if staff() || mine(); allow write: if false; }
     match /notifications/{id} {
       allow read: if staff() || mine();
-      allow create: if staff() || minenew();
-      allow update: if staff() || (mine() && minenew());
+      allow update: if mine() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow create, delete: if false;
     }
-    match /examples/{id} { allow read, write: if staff(); }
-    match /audit/{id}    { allow create: if signedIn(); allow read: if staff(); }
-    match /engine/{id}   { allow read: if signedIn(); allow write: if staff(); }
+    match /examples/{id}      { allow read: if staff(); allow write: if false; }
+    match /audit/{id}         { allow read: if staff(); allow write: if false; }
+    match /engine/{id}        { allow read: if signedIn(); allow write: if false; }
   }
 }
