@@ -7,8 +7,9 @@ Collections (docs):
  txs/{id}      {id,uid,amt,rn,rb,ra,sess,ref,ts,sim,status(success|failed|refunded),debited,caseId}
  cases/{id}    {id,txid,uid,uname,amt,type(auto|customer),status(investigating|awaiting|auto|refunded|rejected),opened,logs[{t,m,k}],f{tsq,ben,rev,dup},p,verdict(refund|review|auto_success|no_debit),note,acctNote,decidedAt}
  examples/{caseId} {f,y(1=refund was due),ts}   <- written on accountant decision; training data for DT Engine
- engine/config {version,bias,w{},hi,lo,slaMin,trainedOn}
+ engine/config {version,bias,w{},hi,lo,slaMin,trainedOn,metrics{n,acc,loss},before{n,acc,loss}}
  audit/{id}    {t,m}
+ notifications/{id} {id,uid,caseId,txid,type(opened|verified|escalated|refunded|rejected|nodebit),subject,sms,body,ts,read}  <- written by customer side (opened/verified/escalated/nodebit) and accountant decide() (refunded/rejected) via notify()
 DT Engine = <script id="dt-engine"> (dependency-free, exportable). Adapters inside it are the swap-point for real NIP / core-banking calls.
 -->
 <style>
@@ -39,7 +40,15 @@ input,select{width:100%;padding:9px;border:1px solid var(--bd);border-radius:8px
 const DTEngine=(()=>{
 const FEATS=['tsq','ben','rev','dup'],sig=x=>1/(1+Math.exp(-x)),fmt=v=>v===1?'CONFIRMED':v===.5?'PENDING/NO RESPONSE':'NONE';
 const defaults=()=>({version:1,bias:2.5,w:{tsq:-3,ben:-3.5,rev:-2,dup:.5},hi:.8,lo:.1,slaMin:30,trainedOn:0});
-/* ADAPTERS: replace with real NIBSS NIP status query, beneficiary-bank confirmation, core-banking ledger lookups. */
+/* ADAPTERS = the ONLY place the engine touches the outside world. Each may be sync or async (return a value or a Promise).
+   Real integration map (shape returned -> what to call):
+   ledger(tx)      -> {debited:boolean}               core-banking ledger lookup by tx.ref
+   core(tx)        -> {status:'SUCCESS'|'FAILED'}     core switch / transaction-service status
+   nip(tx)         -> {v:1|.5|0}  1 approved, .5 pending or no response, 0 not found   e.g. NIBSS NIP transaction status query by session id tx.sess
+   beneficiary(tx) -> {v:1|.5|0}  1 credit confirmed, .5 unknown, 0 not credited       beneficiary bank confirmation
+   reversal(tx)    -> {v:1|0}     1 a reversal entry already exists                    ledger / GL reversal sweep
+   dup(tx,all)     -> {v:1|0}     1 similar transfer recently                          duplicate / fraud screen
+   The simulated adapters below read tx.sim, which only exists in this demo. Pass your own set as the 6th argument of investigate(). */
 const adapters={
  ledger:tx=>({debited:tx.debited}),
  core:tx=>({status:tx.sim==='ok'?'SUCCESS':'FAILED'}),
@@ -48,14 +57,18 @@ const adapters={
  reversal:tx=>({v:0}),
  dup:(tx,all)=>({v:all.filter(x=>x.id!==tx.id&&x.uid===tx.uid&&x.ra===tx.ra&&x.amt===tx.amt&&Math.abs(x.ts-tx.ts)<36e5).length?1:0})};
 const score=(f,c)=>sig(c.bias+FEATS.reduce((s,k)=>s+c.w[k]*(f[k]||0),0));
+const explain=(f,c)=>[...FEATS.map(k=>({k,v:(f||{})[k]||0,w:c.w[k],c:c.w[k]*((f||{})[k]||0)})),{k:'bias',v:1,w:c.bias,c:c.bias}];
+const conf=p=>Math.max(p,1-p);
+const sla=(cs,now=Date.now())=>cs.status!=='awaiting'||!cs.slaDue?{state:'none'}:now>cs.slaDue?{state:'overdue',mins:Math.ceil((now-cs.slaDue)/6e4)}:{state:'ok',mins:Math.ceil((cs.slaDue-now)/6e4)};
+const evaluate=(ex,c)=>{if(!ex.length)return null;let ok=0,L=0;for(const x of ex){const p=Math.min(1-1e-6,Math.max(1e-6,score(x.f||{},c)));if((p>=.5)===(x.y===1))ok++;L-=x.y===1?Math.log(p):Math.log(1-p)}return{n:ex.length,acc:ok/ex.length,loss:L/ex.length}};
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
-async function investigate(tx,all,cfg,log,delay=550){
+async function investigate(tx,all,cfg,log,delay=550,ad=adapters){
  const L=async(m,k)=>{await log(m,k);await wait(delay)};
- const led=adapters.ledger(tx),core=adapters.core(tx);
+ const led=await ad.ledger(tx),core=await ad.core(tx);
  await L(led.debited?'CHECK 1 Ledger: debit of '+tx.amt+' found for ref '+tx.ref+'.':'CHECK 1 Ledger: no debit entry.',led.debited?'w':'k');
  if(!led.debited)return{f:{},p:0,verdict:'no_debit'};
  await L('CHECK 2 Core switch status: '+core.status+'.',core.status==='FAILED'?'w':'k');
- const nip=adapters.nip(tx),ben=adapters.beneficiary(tx),rev=adapters.reversal(tx),dup=adapters.dup(tx,all);
+ const [nip,ben,rev,dup]=await Promise.all([ad.nip(tx),ad.beneficiary(tx),ad.reversal(tx),ad.dup(tx,all)]);
  await L('CHECK 3 NIP status query, session '+tx.sess+': '+(nip.v===1?'APPROVED':nip.v===.5?'PENDING':'NOT FOUND'),nip.v===1?'k':'w');
  await L('CHECK 4 Beneficiary bank ('+tx.rb+') credit: '+fmt(ben.v),ben.v===1?'k':'w');
  await L('CHECK 5 Reversal sweep: '+(rev.v?'reversal found':'no reversal entry within SLA window'),rev.v?'k':'e');
@@ -65,30 +78,59 @@ async function investigate(tx,all,cfg,log,delay=550){
  await L('SCORE p(refund due)='+p.toFixed(3)+' (hi '+cfg.hi+', lo '+cfg.lo+') -> '+verdict.toUpperCase(),verdict==='refund'?'e':verdict==='review'?'w':'k');
  return{f,p,verdict}}
 function train(ex,cfg,epochs=300,lr=.3){const c=JSON.parse(JSON.stringify(cfg));if(!ex.length)return c;
- for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*err;FEATS.forEach(k=>c.w[k]+=lr*err*(x.f[k]||0))}
- c.version++;c.trainedOn=ex.length;return c}
-return{FEATS,defaults,adapters,score,investigate,train}})();
+ const P=defaults(),lam=.02;/* L2 pull towards the defaults so a few decisions cannot send weights to extremes */
+ for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}
+ c.before=evaluate(ex,cfg);c.metrics=evaluate(ex,c);c.version++;c.trainedOn=ex.length;return c}
+return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,investigate,train}})();
 </script>
 
 <script>
 const $=s=>document.querySelector(s),N=n=>'₦'+Number(n).toLocaleString('en-NG',{minimumFractionDigits:2}),D=t=>new Date(t).toLocaleString('en-NG',{month:'short',day:'2-digit',year:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit'}),rid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,5);
 const BANK='Demo Bank'; /* <- change the bank's name here */
-const STAFF=location.hash==='#accountant';let db,user,uid,S={users:[],txs:[],cases:[],examples:[],audit:[]},CFG=DTEngine.defaults(),tab='cases',cur=null,tx=null,busy=false;
+const clean=v=>String(v||'').replace(/[<>&`\\]/g,'').replace(/'/g,'’').replace(/"/g,'”').trim().slice(0,60);
+const STAFF=location.hash==='#accountant';let db,user,uid,S={users:[],txs:[],cases:[],examples:[],audit:[]},CFG=DTEngine.defaults(),tab='cases',cur=null,tx=null,busy=false,canW=null,LD={},ib=null,seenN=null;
 const toast=m=>{const e=document.createElement('div');e.className='toast';e.textContent=m;document.body.appendChild(e);setTimeout(()=>e.remove(),3000)};
 const st=s=>`<span class="tag s-${s}">${({success:'Successful',failed:'Failed',refunded:'Refunded',awaiting:'Awaiting accountant',investigating:'DT Engine checking…',auto:'Auto-resolved',rejected:'Rejected'})[s]||s}</span>`;
 const put=(c,id,d)=>db.collection(c).doc(id).set(d),upd=(c,id,d)=>db.collection(c).doc(id).update(d);
 const aud=m=>put('audit',rid(),{t:Date.now(),m}).catch(()=>{});
-const watch=n=>db.collection(n).onSnapshot(s=>{S[n]=s.docs.map(d=>({id:d.id,...d.data()}));R()});
+const sc=t=>{const c=S.cases.find(x=>x.id===t.caseId);return t.status==='failed'&&t.debited&&c&&(c.status==='awaiting'||c.status==='investigating')?'<span class="tag s-awaiting">Failed · under review</span>':st(t.status)};
+const hold=e=>{if(e&&e.code==='revoked')toast('Access to the shared data was withdrawn.')};
+const watch=(n,q)=>(q||db.collection(n)).onSnapshot(s=>{S[n]=s.docs.map(d=>({id:d.id,...d.data()}));if(!s.metadata.fromCache)LD[n]=1;R()},hold);
+const watchMe=()=>db.doc('users/'+uid).onSnapshot(s=>{S.users=s.exists?[{id:uid,...s.data()}]:[];if(!s.metadata.fromCache)LD.users=1;R()},hold);
 async function boot(){
  $('#lg').textContent=STAFF?BANK+' · Staff portal':BANK;
  const cl=window.claude&&await claude.use('db');user=window.claude&&await claude.use('user');
  if(!cl||!user){$('#app').innerHTML='<div class="card">Please open this page signed in to claude.ai (as a Contributor on the artifact) so shared data can load.</div>';return}
- db=cl;uid=await user.id();['users','txs','cases','examples','audit'].forEach(watch);
+ db=cl;uid=await user.id();
+ if(!uid){$('#app').innerHTML='<div class="card">Could not identify your account. Open this page signed in to claude.ai.</div>';return}
+ if(STAFF)['users','txs','cases','examples','audit'].forEach(n=>watch(n));
+ else{canW=await user.can('data.write');watchMe();watch('txs',db.collection('txs').where('uid','==',uid));watch('cases',db.collection('cases').where('uid','==',uid));watchN()}
  db.collection('engine').doc('config').onSnapshot(s=>{if(s.exists)CFG={...DTEngine.defaults(),...s.data()};R()});
  addEventListener('hashchange',()=>location.reload())}
-function R(){if(!db)return;$('#app').innerHTML=STAFF?staff():cust();if(cur&&STAFF)caseM(cur,1);if(tx&&!STAFF)receipt(tx,1)}
-function closeM(){cur=tx=null;$('#mod').innerHTML=''}
-const log=(cid)=>async(m,k)=>{const c=S.cases.find(x=>x.id===cid)||{logs:[]};const logs=[...(c.logs||[]),{t:Date.now(),m,k:k||''}];await upd('cases',cid,{logs})};
+const FQ='#app input,#app select,#mod input,#mod select';
+const snapF=()=>{const o={},a=document.activeElement;document.querySelectorAll(FQ).forEach(e=>{const k=e.name||e.id;if(k)o[k]=e.value});return{o,k:a&&(a.name||a.id),p:a&&a.selectionStart}};
+const putF=z=>{document.querySelectorAll(FQ).forEach(e=>{const k=e.name||e.id;if(k&&k in z.o)e.value=z.o[k]});if(z.k){const e=document.querySelector('[name="'+z.k+'"],#'+z.k);if(e){e.focus();try{if(z.p!=null)e.setSelectionRange(z.p,z.p)}catch(x){}}}};
+function R(){if(!db)return;const z=snapF();$('#app').innerHTML=STAFF?staff():(LD.users?cust():'Loading…');if(cur&&STAFF)caseM(cur,1);if(tx&&!STAFF)receipt(tx,1);if(ib&&!STAFF)inbox();bell();putF(z)}
+function closeM(){cur=tx=ib=null;$('#mod').innerHTML=''}
+
+/* ================= NOTIFICATIONS (SMS + email style, stored in db 'notifications') ================= */
+const NM={
+ opened:(t,c)=>['We are looking into your transfer',`${BANK}: Case ${c} opened for your ${N(t.amt)} transfer to ${t.rn}. We are verifying it. No action needed.`,`Hello, we have opened case ${c} for your ${N(t.amt)} transfer to ${t.rn}. Our DT Engine is checking whether the money reached the recipient. You do not need to do anything. We will update you as soon as the checks are complete.`],
+ verified:(t,c)=>['Good news: your transfer was delivered',`${BANK}: Case ${c} closed. Your ${N(t.amt)} transfer to ${t.rn} was confirmed delivered and is now marked Successful. No refund is due.`,`Hello, we checked with the recipient bank and confirmed that ${N(t.amt)} reached ${t.rn}. Your transfer status is now Successful, so no refund is due. Case ${c} is closed.`],
+ escalated:(t,c)=>['Your case is with our accounts team',`${BANK}: Checks on case ${c} (${N(t.amt)}) are complete. Our accounts team is reviewing it and will update you.`,`Hello, our automated checks on case ${c} for your ${N(t.amt)} transfer to ${t.rn} are complete. An accountant will now review the results and decide on your refund. We will notify you as soon as there is a decision.`],
+ refunded:(t,c)=>['Your refund has been approved',`${BANK}: Refund of ${N(t.amt)} approved and credited to your account (case ${c}).`,`Hello, good news: your refund of ${N(t.amt)} for case ${c} has been approved and credited to your account. We are sorry for the inconvenience.`],
+ rejected:(t,c)=>['Update on your refund request',`${BANK}: Case ${c} was reviewed and a refund was not approved. Please contact support for details.`,`Hello, after reviewing case ${c} for your ${N(t.amt)} transfer, our accounts team could not approve a refund. If you think this is wrong, please contact customer support and quote the case number.`],
+ nodebit:(t,c)=>['No money left your account',`${BANK}: Case ${c} closed. No debit was found for this ${N(t.amt)} transfer, so nothing needs refunding.`,`Hello, we checked case ${c} and found that your account was not debited for this ${N(t.amt)} transfer. Nothing needs to be refunded.`]};
+async function notify(to,t,cid,type){try{const m=NM[type](t,cid.slice(0,7)),id='N'+rid();await put('notifications',id,{id,uid:to,caseId:cid,txid:t.id||'',type,subject:m[0],sms:m[1],body:m[2],ts:Date.now(),read:false})}catch(e){}}
+const watchN=()=>db.collection('notifications').where('uid','==',uid).onSnapshot(s=>{const l=s.docs.map(d=>({id:d.id,...d.data()}));if(!s.metadata.fromCache){if(seenN)l.filter(x=>!seenN.has(x.id)).forEach(x=>toast('📩 '+x.subject));seenN=new Set(l.map(x=>x.id))}S.notifications=l;R()},hold);
+const unread=()=>(S.notifications||[]).filter(x=>!x.read).length;
+function bell(){if(STAFF||!LD.users||!S.users.length){$('#who').innerHTML='';return}const n=unread();$('#who').innerHTML=`<button onclick="inbox('sms')">🔔 Messages${n?' <b style="color:var(--pr)">'+n+'</b>':''}</button>`}
+const rd=id=>{const n=(S.notifications||[]).find(x=>x.id===id);if(n&&!n.read)upd('notifications',id,{read:true})};
+async function rdAll(){for(const n of (S.notifications||[]).filter(x=>!x.read))await upd('notifications',n.id,{read:true})}
+function inbox(tab){tx=null;ib=tab||ib||'sms';const l=[...(S.notifications||[])].sort((a,b)=>b.ts-a.ts),n=unread();
+ $('#mod').innerHTML=`<div class="modal" onclick="if(event.target==this)closeM()"><div><div style="display:flex;gap:6px;margin-bottom:10px;align-items:center"><button class="${ib==='sms'?'on':''}" onclick="inbox('sms')">SMS</button><button class="${ib==='email'?'on':''}" onclick="inbox('email')">Email</button><span style="flex:1"></span>${n?'<button onclick="rdAll()">Mark all read</button>':''}</div>
+ ${l.map(x=>`<div class="note" style="cursor:pointer;${x.read?'':'border-left:3px solid var(--pr)'}" onclick="rd('${x.id}')"><div class="hint">${ib==='sms'?BANK+' · SMS':BANK+' · Email'} · ${D(x.ts)}${x.read?'':' · new'}</div>${ib==='sms'?'<div style="color:var(--tx)">'+x.sms+'</div>':'<b style="color:var(--tx)">'+x.subject+'</b><div style="color:var(--tx);margin-top:4px">'+x.body+'</div>'}</div>`).join('')||'<div class="mu">No messages yet. You will get an SMS and an email at each stage of a case.</div>'}
+ <div style="margin-top:10px"><button onclick="closeM()">Close</button></div></div></div>`}
 
 /* ================= CUSTOMER SIDE ================= */
 function cust(){const u=S.users.find(x=>x.id===uid);
@@ -97,23 +139,26 @@ function cust(){const u=S.users.find(x=>x.id===uid);
  return `<div class="grid"><div><div class="bal"><span>${u.name} · ${u.acct}</span><b>${N(u.bal)}</b>${u.frozen?'<span class="tag">Account frozen</span>':''}</div>
  <div class="card" style="margin-top:12px"><h3 style="margin-top:0">Transfer money</h3><form onsubmit="send(this);return false"><label class="hint">Recipient name</label><input name="rn" value="BELLO GARBA"><label class="hint">Bank</label><select name="rb"><option>OPay</option><option>GTBank</option><option>Access Bank</option><option>Kuda</option><option>PalmPay</option></select><label class="hint">Account number</label><input name="ra" value="8108080082" inputmode="numeric"><label class="hint">Amount (₦)</label><input name="amt" type="number" value="1500">
  <label class="hint">🧪 Test mode: simulate network outcome</label><select name="sim"><option value="ok">Normal – succeeds</option><option value="ghost">Fails, debited, recipient NOT credited</option><option value="mismatch">Marked failed, debited, recipient WAS credited</option><option value="unclear">Marked failed, debited, status unclear</option><option value="clean">Fails, no debit</option></select><button class="p" style="width:100%" ${busy?'disabled':''}>Send</button></form></div></div>
- <div class="card"><h3 style="margin-top:0">Transactions</h3>${my.map(t=>`<div class="row" style="cursor:pointer" onclick="receipt('${t.id}')"><div><b>${t.rn}</b><br><span class="mu">${D(t.ts)}</span></div><div style="text-align:right"><b>${t.debited?'−':''}${N(t.amt)}</b><br>${st(t.status)}</div></div>`).join('')||'<div class="mu">No transactions yet.</div>'}<div class="hint">Tap a transaction for its receipt and to report a dispute.</div></div></div>`}
-async function signup(){const n=$('#nm').value.trim();if(!n)return toast('Enter your name');await put('users',uid,{name:n,acct:'20'+Math.floor(1e8+Math.random()*9e8),bal:100000,frozen:false});aud('New customer '+n)}
-async function send(f){const u=S.users.find(x=>x.id===uid),amt=+f.amt.value,sim=f.sim.value;
- if(u.frozen)return toast('Account frozen. Contact the bank.');if(!f.rn.value||!f.ra.value||amt<=0)return toast('Fill all fields');if(amt>u.bal)return toast('Insufficient balance');
- busy=true;const id='T'+rid(),t={id,uid,amt,rn:f.rn.value.toUpperCase(),rb:f.rb.value,ra:f.ra.value,sess:'1000332'+Date.now()+Math.floor(Math.random()*1e5),ref:rid().slice(0,11),ts:Date.now(),sim,status:sim==='ok'?'success':'failed',debited:sim!=='clean',caseId:null};
+ <div class="card"><h3 style="margin-top:0">Transactions</h3>${my.map(t=>`<div class="row" style="cursor:pointer" onclick="receipt('${t.id}')"><div><b>${t.rn}</b><br><span class="mu">${D(t.ts)}</span></div><div style="text-align:right"><b>${t.debited?'−':''}${N(t.amt)}</b><br>${sc(t)}</div></div>`).join('')||'<div class="mu">No transactions yet.</div>'}<div class="hint">Tap a transaction for its receipt and to report a dispute.</div></div></div>`}
+async function signup(){const n=clean($('#nm').value);if(!n)return toast('Enter your name');if(canW===false)return toast('View-only access: ask the owner to make you a Contributor.');
+ if((await db.doc('users/'+uid).get()).exists)return;await put('users',uid,{name:n,acct:'20'+Math.floor(1e8+Math.random()*9e8),bal:100000,frozen:false});aud('New customer '+n)}
+async function send(f){if(busy)return;const u=S.users.find(x=>x.id===uid),amt=Math.round(+f.amt.value*100)/100,sim=f.sim.value,ra=f.ra.value.replace(/\D/g,''),rn=clean(f.rn.value).toUpperCase();
+ if(u.frozen)return toast('Account frozen. Contact the bank.');if(!rn||!(amt>0))return toast('Fill all fields');if(ra.length!==10)return toast('Account number must be 10 digits');if(amt>u.bal)return toast('Insufficient balance');
+ busy=true;try{const id='T'+rid(),t={id,uid,amt,rn,rb:f.rb.value,ra,sess:'1000332'+Date.now()+Math.floor(Math.random()*1e5),ref:rid().slice(0,11),ts:Date.now(),sim,status:sim==='ok'?'success':'failed',debited:sim!=='clean',caseId:null};
  if(t.debited)await upd('users',uid,{bal:u.bal-amt});await put('txs',id,t);aud('Transfer '+id+' '+N(amt)+' by '+u.name+' -> '+t.status);
- if(t.status==='failed'&&t.debited){toast('Transfer failed. You were debited — DT Engine has flagged it automatically.');await runCase(t,'auto')}else toast(t.status==='success'?'Transfer successful':'Transfer failed. You were not debited.');busy=false;R()}
-async function runCase(t,type,note){const u=S.users.find(x=>x.id===t.uid)||{name:'?'},cid='C'+rid();
- await put('cases',cid,{id:cid,txid:t.id,uid:t.uid,uname:u.name,amt:t.amt,type,status:'investigating',opened:Date.now(),logs:[{t:Date.now(),m:'Case opened via '+(type==='auto'?'AUTO-DETECTION (status FAILED + debit present)':'CUSTOMER DISPUTE'+(note?': "'+note+'"':''))+'. DT Engine v'+CFG.version+' starting.',k:''}],note:note||'',verdict:null});
- await upd('txs',t.id,{caseId:cid});const r=await DTEngine.investigate(t,S.txs,CFG,log(cid));
+ if(t.status==='failed'&&t.debited){toast('Transfer failed. You were debited — DT Engine has flagged it automatically.');await runCase(t,'auto')}else toast(t.status==='success'?'Transfer successful':'Transfer failed. You were not debited.');}catch(e){toast('Something went wrong: '+(e.message||e.code||'error'))}finally{busy=false;R()}}
+async function runCase(t,type,note){const u=S.users.find(x=>x.id===t.uid)||{name:'?'},cid='C'+rid(),logs=[{t:Date.now(),m:'Case opened via '+(type==='auto'?'AUTO-DETECTION (status FAILED + debit present)':'CUSTOMER DISPUTE'+(note?': "'+note+'"':''))+'. DT Engine v'+CFG.version+' starting.',k:''}];
+ const lg=async(m,k)=>{logs.push({t:Date.now(),m,k:k||''});await upd('cases',cid,{logs:[...logs]})};
+ await put('cases',cid,{id:cid,txid:t.id,uid:t.uid,uname:u.name,amt:t.amt,type,status:'investigating',opened:Date.now(),logs:[...logs],note:note||'',verdict:null});
+ await upd('txs',t.id,{caseId:cid});notify(t.uid,t,cid,'opened');const r=await DTEngine.investigate(t,S.txs,CFG,lg).catch(async e=>{await lg('Engine error: '+(e&&e.message||e)+'. Escalating for manual review.','e');return{f:null,p:.5,verdict:'review'}});
  const out={f:r.f,p:r.p,verdict:r.verdict,slaDue:Date.now()+CFG.slaMin*6e4};
- if(r.verdict==='auto_success'||r.verdict==='no_debit'){if(t.status==='failed')await upd('txs',t.id,{status:'success'});out.status='auto';await log(cid)('Money reached beneficiary. Transaction status corrected FAILED -> SUCCESSFUL. No refund due.','k')}
- else{out.status='awaiting';await log(cid)(r.verdict==='refund'?'Escalated to accountant with REFUND recommendation.':'Evidence inconclusive. Escalated to accountant for manual review.','w')}
- await upd('cases',cid,out);aud('DT Engine finished '+cid+': '+r.verdict)}
+ if(r.verdict==='no_debit'){out.status='auto';await lg('No debit was made on this transfer, so there is nothing to refund. Case closed.','k');notify(t.uid,t,cid,'nodebit')}
+ else if(r.verdict==='auto_success'){if(t.status==='failed')await upd('txs',t.id,{status:'success'});out.status='auto';await lg(t.status==='failed'?'Money reached beneficiary. Transaction status corrected FAILED -> SUCCESSFUL. No refund due.':'Transfer confirmed as delivered to the beneficiary. No refund due.','k');notify(t.uid,t,cid,'verified')}
+ else{out.status='awaiting';await lg(r.verdict==='refund'?'Escalated to accountant with REFUND recommendation.':'Evidence inconclusive. Escalated to accountant for manual review.','w');notify(t.uid,t,cid,'escalated')}
+ out.logs=[...logs];await upd('cases',cid,out);aud('DT Engine finished '+cid+': '+r.verdict)}
 function receipt(id,keep){tx=id;const t=S.txs.find(x=>x.id===id);if(!t)return;const c=S.cases.find(x=>x.id===t.caseId),ok=t.status!=='failed',dot=(x,b)=>`<div><div class="dot ${x}"></div>${b}</div>`;
- $('#mod').innerHTML=`<div class="modal" onclick="if(event.target==this)closeM()"><div class="rcpt" style="margin:auto"><div class="mu" style="text-align:center">Transaction Details</div><h2 style="text-align:center;margin:6px 0">${N(t.amt)}</h2><div style="text-align:center">${st(t.status)}</div>
- <div class="steps">${dot('','Payment<br>'+(t.debited?'successful':'declined'))}${dot(t.debited?'':'x','Submitted<br>to bank')}${dot(ok?'':'x','Received<br>by bank')}</div>
+ $('#mod').innerHTML=`<div class="modal" onclick="if(event.target==this)closeM()"><div class="rcpt" style="margin:auto"><div class="mu" style="text-align:center">Transaction Details</div><h2 style="text-align:center;margin:6px 0">${N(t.amt)}</h2><div style="text-align:center">${sc(t)}</div>
+ <div class="steps">${dot(t.debited?'':'x','Payment<br>'+(t.debited?'successful':'declined'))}${dot(t.debited?'':'x','Submitted<br>to bank')}${dot(ok?'':'x','Received<br>by bank')}</div>
  <div class="note">${t.status==='success'?'The transfer has been successfully paid and submitted to the recipient bank. Kindly note the actual credited time is subject to the bank.':t.status==='refunded'?'This transaction failed and your money was refunded after review.':t.debited?'This transfer did not complete. Our system is verifying it and you will be updated.':'This transfer did not complete. You were not debited.'}</div>
  <div class="row"><span class="mu">Transfer Amount</span><b>${N(t.amt)}</b></div><div class="row"><span class="mu">Fee</span><span><s class="mu">₦13.50</s> ₦0.00</span></div><div class="row"><span class="mu">Payment Amount</span><b>${N(t.amt)}</b></div>
  <div class="row"><span class="mu">Recipient</span><span style="text-align:right">${t.rn}<br><span class="mu">${t.rb} | ${t.ra}</span></span></div><div class="row"><span class="mu">Session ID</span><span style="word-break:break-all;text-align:right;max-width:60%">${t.sess}</span></div>
@@ -130,19 +175,33 @@ function staff(){const aw=S.cases.filter(c=>c.status==='awaiting').length;
  if(tab==='cu')h+=`<div class="card ov"><table class="tbl"><tr><th>Name</th><th>Account</th><th>Balance</th><th>Cases</th><th></th></tr>${S.users.map(u=>`<tr><td>${u.name}</td><td>${u.acct}</td><td>${N(u.bal)}</td><td>${S.cases.filter(c=>c.uid===u.id).length}</td><td><button onclick="upd('users','${u.id}',{frozen:${!u.frozen}});aud('${u.frozen?'Unfroze':'Froze'} ${u.name}')">${u.frozen?'Unfreeze':'Freeze'}</button></td></tr>`).join('')}</table></div>`;
  if(tab==='en')h+=`<div class="card"><h3 style="margin-top:0">DT Engine v${CFG.version}</h3><div class="hint">Logistic confidence model: p = sigmoid(bias + Σ weight × evidence). Accountant decisions become training examples.</div>
   <table class="tbl"><tr><th>Bias</th>${DTEngine.FEATS.map(k=>`<th>w:${k}</th>`).join('')}<th>hi</th><th>lo</th><th>Trained on</th></tr><tr><td>${CFG.bias.toFixed(2)}</td>${DTEngine.FEATS.map(k=>`<td>${CFG.w[k].toFixed(2)}</td>`).join('')}<td>${CFG.hi}</td><td>${CFG.lo}</td><td>${CFG.trainedOn}</td></tr></table>
-  <p>Labelled examples available: <b>${S.examples.length}</b></p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="p" onclick="trainE()">Train on accountant decisions</button><button onclick="put('engine','config',DTEngine.defaults());toast('Reset to defaults')">Reset</button><button onclick="exportE()">Export engine (.js)</button></div></div>`;
- if(tab==='au')h+=`<div class="card"><div class="log">${[...S.audit].sort((a,b)=>b.t-a.t).map(a=>`<div>[${D(a.t)}] ${a.m}</div>`).join('')||'No activity'}</div></div>`;return h}
+  <p>Labelled examples available: <b>${S.examples.length}</b></p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="p" onclick="trainE()">Train on accountant decisions</button><button onclick="put('engine','config',DTEngine.defaults());toast('Reset to defaults')">Reset</button><button onclick="exportEngine()">Export engine (.js)</button></div></div>`;
+ if(tab==='en')h+=engineExtra();if(tab==='au')h+=`<div class="card"><div class="log">${[...S.audit].sort((a,b)=>b.t-a.t).map(a=>`<div>[${D(a.t)}] ${a.m}</div>`).join('')||'No activity'}</div></div>`;return h}
 function caseM(id,keep){const c=S.cases.find(x=>x.id===id);if(!c)return;
  $('#mod').innerHTML=`<div class="modal" onclick="if(event.target==this)closeM()"><div><h3 style="margin:0 0 4px">Case ${c.id.slice(0,7)} ${st(c.status)}</h3><div class="mu">${c.uname} · ${N(c.amt)} · ${c.type==='auto'?'Auto-flagged':'Customer dispute'} · opened ${D(c.opened)}</div>
- ${c.p!=null?`<div class="note">Confidence a refund is due: <b>${(c.p*100).toFixed(1)}%</b> · verdict <b>${c.verdict}</b> · evidence ${JSON.stringify(c.f)}</div>`:''}
+ ${c.p!=null?`<div class="note">Confidence a refund is due: <b>${(c.p*100).toFixed(1)}%</b> · verdict <b>${c.verdict}</b> · drivers, current model (log-odds): ${c.f?DTEngine.explain(c.f,CFG).map(e=>e.k+' '+(e.c>=0?'+':'')+e.c.toFixed(2)).join(' · '):'n/a'}</div>`:''}
  <h4>DT Engine log</h4><div class="log">${(c.logs||[]).map(l=>`<div class="${l.k}">[${new Date(l.t).toLocaleTimeString('en-GB')}] ${l.m}</div>`).join('')}</div>
  ${c.status==='awaiting'?`<h4>Your decision</h4><input id="an" placeholder="Decision note"><div style="display:flex;gap:8px"><button class="g" style="flex:1" onclick="decide('${c.id}',1)">Approve refund</button><button class="p" style="flex:1" onclick="decide('${c.id}',0)">Reject</button></div>`:c.acctNote?`<div class="note">Decision note: ${c.acctNote}</div>`:''}
  <div style="margin-top:10px"><button onclick="closeM()">Close</button></div></div></div>`}
 async function decide(id,y){const c=S.cases.find(x=>x.id===id),u=S.users.find(x=>x.id===c.uid),note=$('#an').value;
  if(y){await upd('users',u.id,{bal:u.bal+c.amt});await upd('txs',c.txid,{status:'refunded'})}
  await upd('cases',id,{status:y?'refunded':'rejected',acctNote:note,decidedAt:Date.now(),logs:[...c.logs,{t:Date.now(),m:'ACCOUNTANT DECISION: '+(y?'REFUND APPROVED, '+N(c.amt)+' credited':'REFUND REJECTED')+(note?' — '+note:''),k:y?'k':'e'}]});
- if(c.f)await put('examples',id,{f:c.f,y,ts:Date.now()});aud('Case '+id+(y?' refunded':' rejected'));closeM()}
+ if(c.f)await put('examples',id,{f:c.f,y,ts:Date.now()});aud('Case '+id+(y?' refunded':' rejected'));notify(c.uid,S.txs.find(x=>x.id===c.txid)||{amt:c.amt,rn:'the recipient'},id,y?'refunded':'rejected');closeM()}
+const pc=v=>(v*100).toFixed(1)+'%';
+function engineExtra(){const m=CFG.metrics,b=CFG.before,ks=[...DTEngine.FEATS,'bias'],val=k=>k==='bias'?CFG.bias:CFG.w[k],mx=Math.max(1,...ks.map(k=>Math.abs(val(k)))),vd=p=>p>=CFG.hi?'refund':p<=CFG.lo?'auto_success':'review';
+ const bar=v=>`<div style="display:flex;align-items:center;gap:8px"><div style="position:relative;height:8px;flex:1;background:var(--bd);border-radius:4px"><div style="position:absolute;top:0;height:8px;border-radius:4px;background:${v<0?'var(--ok)':'var(--pr)'};${v<0?'right':'left'}:50%;width:${Math.abs(v)/mx*50}%"></div></div><span class="hint" style="width:44px">${v.toFixed(2)}</span></div>`;
+ const SC=[['Recipient NOT credited',{tsq:0,ben:0,rev:0,dup:0}],['Recipient credited (marked failed)',{tsq:1,ben:1,rev:0,dup:0}],['Status unclear',{tsq:.5,ben:.5,rev:0,dup:0}],['Not credited, but reversal found',{tsq:0,ben:0,rev:1,dup:0}]];
+ const ex=[...S.examples].sort((a,b)=>b.ts-a.ts).slice(0,8);
+ return `<div class="grid"><div class="card"><h3 style="margin-top:0">What the model learned</h3><div class="hint">Red pushes towards REFUND, green towards NO REFUND.</div>${ks.map(k=>`<div style="margin-top:6px"><span class="mu">${k}</span>${bar(val(k))}</div>`).join('')}<h4>Accuracy on accountant decisions</h4>${m?`<div>Now: <b>${pc(m.acc)}</b> correct, loss ${m.loss.toFixed(3)} (${m.n} examples)</div>${b?`<div class="hint">Before training: ${pc(b.acc)} correct, loss ${b.loss.toFixed(3)}</div>`:''}`:'<div class="hint">Not trained yet. Decide some cases, then press Train.</div>'}</div>
+ <div class="card"><h3 style="margin-top:0">Thresholds and SLA</h3><label class="hint">Recommend refund when probability is at least</label><input id="cf-hi" type="number" step="0.05" value="${CFG.hi}"><label class="hint">Auto-correct to Successful when probability is at most</label><input id="cf-lo" type="number" step="0.05" value="${CFG.lo}"><label class="hint">SLA: minutes an accountant has to respond</label><input id="cf-sla" type="number" value="${CFG.slaMin}"><button class="p" onclick="saveCfg()">Save settings</button></div></div>
+ <div class="card ov"><h3 style="margin-top:0">Try the engine</h3><table class="tbl"><tr><th>Evidence</th><th>p(refund due)</th><th>Confidence</th><th>Verdict</th></tr>${SC.map(([n,f])=>{const p=DTEngine.score(f,CFG);return `<tr><td>${n}</td><td>${pc(p)}</td><td>${pc(DTEngine.conf(p))}</td><td>${vd(p)}</td></tr>`}).join('')}</table></div>
+ <div class="card ov"><h3 style="margin-top:0">Latest training examples</h3>${ex.length?`<table class="tbl">${ex.map(e=>`<tr><td>${D(e.ts)}</td><td>${DTEngine.FEATS.map(k=>k+' '+((e.f||{})[k]||0)).join(', ')}</td><td>${e.y?'refund was due':'no refund'}</td></tr>`).join('')}</table>`:'<div class="hint">None yet. Approve or reject a case to create one.</div>'}</div>`}
+async function saveCfg(){const hi=+$('#cf-hi').value,lo=+$('#cf-lo').value,sl=+$('#cf-sla').value;if(!(lo>0&&lo<hi&&hi<1)||!(sl>=1))return toast('Need 0 < low < high < 1 and an SLA of at least 1 minute');await put('engine','config',{...CFG,hi,lo,slaMin:Math.round(sl)});aud('DT Engine settings: high '+hi+', low '+lo+', SLA '+Math.round(sl)+'m');toast('Engine settings saved')}
+async function exportEngine(){const dl=await claude.use('downloads');if(!dl)return toast('Downloads unavailable here');const nl=String.fromCharCode(10),src=document.getElementById('dt-engine').textContent;
+ const head=['/* DT Engine v'+CFG.version+', exported '+new Date().toISOString().slice(0,10)+', trained on '+CFG.trainedOn+' accountant decisions.','   Standalone, no dependencies. Works in Node (require) and in a browser script tag.','   Usage:','     const r = await DTEngine.investigate(tx, allTxs, DTEngine.TRAINED, async (msg, kind) => console.log(msg), 0);','     // r = { f: evidence, p: probability a refund is due, verdict: refund | review | auto_success | no_debit }','   Replace DTEngine.adapters (or pass your own as the 6th argument) to use real NIBSS and core-banking calls. */'].join(nl);
+ const tail=nl+'DTEngine.TRAINED='+JSON.stringify(CFG,null,1)+';'+nl+'if(typeof module!=="undefined")module.exports=DTEngine;'+nl;
+ try{await dl.save({filename:'dt_engine.js.txt',data:head+nl+src+tail});toast('Saved as dt_engine.js.txt. Rename it to dt_engine.js.')}catch(e){if(!e||e.code!=='declined')toast('Could not save the file ('+((e&&e.code)||'error')+')')}}
 async function trainE(){if(!S.examples.length)return toast('No decisions to learn from yet');const c=DTEngine.train(S.examples.map(e=>({f:e.f,y:e.y})),CFG);await put('engine','config',c);toast('DT Engine retrained on '+c.trainedOn+' examples (v'+c.version+')')}
-async function exportE(){const dl=await claude.use('downloads');if(!dl)return toast('Downloads unavailable');try{await dl.save({filename:'dt_engine.js',data:document.getElementById('dt-engine').textContent+'\n/* current trained config: */\n/* '+JSON.stringify(CFG)+' */\nif(typeof module!=="undefined")module.exports=DTEngine;'})}catch(e){}}
+async function exportE(){const dl=await claude.use('downloads');if(!dl)return toast('Downloads unavailable');try{await dl.save({filename:'dt_engine.js.txt',data:document.getElementById('dt-engine').textContent+'\n/* current trained config: */\n/* '+JSON.stringify(CFG)+' */\nif(typeof module!=="undefined")module.exports=DTEngine;'});toast('Saved as dt_engine.js.txt. Rename it to dt_engine.js.')}catch(e){if(!e||e.code!=='declined')toast('Could not save the file ('+((e&&e.code)||'error')+')')}}
 setInterval(()=>{if(STAFF&&tab==='cases'&&!cur)R()},30000);boot();
 </script></body></html>
