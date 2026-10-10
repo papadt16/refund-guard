@@ -1,11 +1,9 @@
-/* 1) Paste your Firebase web-app config here (Project settings > Your apps > Web). These values are not secret; Firestore rules protect the data.
-   2) List the staff emails (must match firestore.rules). */
 window.FIREBASE_CONFIG = {
-  apiKey: "PASTE_API_KEY",
-  authDomain: "PASTE_PROJECT.firebaseapp.com",
-  projectId: "PASTE_PROJECT_ID",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: "PASTE_APP_ID"
+  apiKey: "AIzaSyA0W488XH-MQz9C73sJjq7fM0A2kBMv_JQ",
+  authDomain: "refund-guard-8f6de.firebaseapp.com",
+  projectId: "refund-guard-8f6de",
+  storageBucket: "refund-guard-8f6de.firebasestorage.app",
+  messagingSenderId: "436750642511",
+  appId: "1:436750642511:web:f3121e766d1ff281bde93a"
 };
-window.STAFF_EMAILS = ["accountant@example.com"];
+window.STAFF_EMAILS = ["aigbe208@gmail.com"];

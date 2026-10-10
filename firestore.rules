@@ -4,7 +4,7 @@ service cloud.firestore {
     // Clients can only READ. All writes (balances, transfers, cases, refunds, engine settings) happen on the server via the Admin SDK, which bypasses these rules.
     function signedIn() { return request.auth != null; }
     // keep identical to STAFF_EMAILS in firebase-config.js and the STAFF_EMAILS env var on Vercel
-    function staff() { return signedIn() && request.auth.token.email in ['accountant@example.com']; }
+    function staff() { return signedIn() && request.auth.token.email in ['aigbe208@gmail.com']; }
     function mine() { return signedIn() && resource.data.uid == request.auth.uid; }
 
     match /users/{id}         { allow read: if staff() || (signedIn() && request.auth.uid == id); allow write: if false; }
