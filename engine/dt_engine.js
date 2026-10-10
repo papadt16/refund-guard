@@ -1,6 +1,3 @@
-/* DT Engine, standalone copy. Same code as the <script id="dt-engine"> block in app.html.
-   Usage: const r = await DTEngine.investigate(tx, allTxs, DTEngine.defaults(), async (msg, kind) => console.log(msg), 0);
-   Pass your own adapters as the 6th argument to use real NIBSS / core-banking calls. */
 /* ===== DT ENGINE v1 — dependency-free refund-resolution engine =====
    Flow: detect (failed + debited) -> run checks via ADAPTERS -> feature vector -> logistic confidence score -> verdict.
    p = probability a refund is DUE. verdict: p>=hi 'refund' | p<=lo 'auto_success' | else 'review'. Humans always decide refunds.
@@ -83,4 +80,5 @@ function train(ex,cfg,epochs=300,lr=.3){const c=JSON.parse(JSON.stringify(cfg));
  for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}
  c.before=evaluate(ex,cfg);c.metrics=evaluate(ex,c);c.version++;c.trainedOn=ex.length;return c}
 return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,patterns,parseSettlement,reconcile,sampleSettlement,investigate,train}})();
-if(typeof module!=="undefined")module.exports=DTEngine;
+
+if (typeof module !== "undefined") module.exports = DTEngine;
