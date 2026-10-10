@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""Builds index.html (standalone Firebase build for Vercel etc.) from app.html (the claude.ai artifact build).
+Run after every edit to app.html:  python3 make_web.py"""
+h = open('app.html', encoding='utf-8').read()
+def rep(old, new):
+    global h
+    assert h.count(old) == 1, 'pattern not found once: ' + old[:50]
+    h = h.replace(old, new)
+V = '10.12.2'
+tags = ''.join('<script src="https://www.gstatic.com/firebasejs/%s/firebase-%s-compat.js"></script>' % (V, m) for m in ('app', 'auth', 'firestore'))
+tags += '<script src="firebase-config.js"></script><script src="platform.js"></script>'
+rep('</head>', tags + '</head>')
+rep('Please open this page signed in to claude.ai (as a Contributor on the artifact) so shared data can load.', 'Could not connect to the database. Open the browser console for details, and check firebase-config.js, the Firestore rules and SETUP.md.')
+rep('Could not identify your account. Open this page signed in to claude.ai.', 'Could not identify your account. Check that Anonymous sign-in is enabled in Firebase Authentication.')
+rep('The staff portal is only available to people with edit access to this artifact. Ask the owner to give you the Editor role.', 'This account is not on the staff list. Add its email to STAFF_EMAILS (firebase-config.js) and to firestore.rules.')
+rep("if(e&&e.code==='revoked')toast('Access to the shared data was withdrawn.')", "if(e&&(e.code==='revoked'||e.code==='permission-denied'))toast('No permission to read shared data. Check the Firestore rules.')")
+open('index.html', 'w', encoding='utf-8').write(h)
+print('index.html written', len(h), 'bytes')

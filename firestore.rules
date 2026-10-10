@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    // keep this list identical to STAFF_EMAILS in firebase-config.js
+    function staff() { return signedIn() && request.auth.token.email in ['accountant@example.com']; }
+    function mine() { return signedIn() && resource.data.uid == request.auth.uid; }
+    function minenew() { return signedIn() && request.resource.data.uid == request.auth.uid; }
+
+    match /users/{id} { allow read, write: if staff() || (signedIn() && request.auth.uid == id); }
+    match /txs/{id} {
+      allow read: if staff() || mine();
+      allow create: if staff() || minenew();
+      allow update: if staff() || (mine() && minenew());
+      allow delete: if staff();
+    }
+    match /cases/{id} {
+      allow read: if staff() || mine();
+      allow create: if staff() || minenew();
+      allow update: if staff() || (mine() && minenew());
+      allow delete: if staff();
+    }
+    match /notifications/{id} {
+      allow read: if staff() || mine();
+      allow create: if staff() || minenew();
+      allow update: if staff() || (mine() && minenew());
+    }
+    match /examples/{id} { allow read, write: if staff(); }
+    match /audit/{id}    { allow create: if signedIn(); allow read: if staff(); }
+    match /engine/{id}   { allow read: if signedIn(); allow write: if staff(); }
+  }
+}
