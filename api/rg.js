@@ -47,6 +47,16 @@ async function verifyFp(ctx, fp, ph) {
   const sc = ad.readUInt32BE(33); if ((sc || cred.sc) && sc <= cred.sc) throw bad('Fingerprint replay detected');
   await putSec(ctx.uid, { creds: s.creds.map(c => c.id === cred.id ? { ...c, sc } : c) });
 }
+/* Account numbers must be 10 digits and registered in accts/{number}. Repairs older accounts (11-digit numbers, or ones created before the registry existed). */
+async function healAcct(uid) {
+  const ref = db.doc('users/' + uid), s = await ref.get(); if (!s.exists) return false; const u = s.data(), ok10 = /^\d{10}$/.test(String(u.acct || ''));
+  if (ok10) { const a = await db.doc('accts/' + u.acct).get(); if (a.exists && a.data().uid === uid) return false;
+    if (!a.exists) { const dup = (await db.collection('users').where('acct', '==', u.acct).get()).docs.filter(d => d.ref.path !== 'users/' + uid); if (!dup.length) { await db.doc('accts/' + u.acct).set({ uid }); return true } } }
+  for (let i = 0; i < 12; i++) { const acct = '20' + Math.floor(1e7 + Math.random() * 9e7), aref = db.doc('accts/' + acct); let done = false;
+    await db.runTransaction(async tr => { if ((await tr.get(aref)).exists) return; tr.set(aref, { uid }); tr.update(ref, { acct }); done = true });
+    if (done) { if (u.acct) { const o = await db.doc('accts/' + u.acct).get(); if (o.exists && o.data().uid === uid) await db.doc('accts/' + u.acct).delete() } await aud('Account number repaired for ' + u.name + ': ' + u.acct + ' -> ' + acct); return true } }
+  throw bad('Could not repair the account number', 500);
+}
 const aud = m => db.collection('audit').add({ t: Date.now(), m }).catch(() => {});
 const getCfg = async () => { const s = await db.doc('engine/config').get(); return { ...E.defaults(), ...(s.exists ? s.data() : {}) } };
 async function notify(to, t, cid, type) { try { const m = NM[type](t, cid.slice(0, 7)), id = 'N' + rid(); await db.doc('notifications/' + id).set({ id, uid: to, caseId: cid, txid: t.id || '', type, subject: m[0], sms: m[1], body: m[2], ts: Date.now(), read: false }) } catch (e) {} }
@@ -99,6 +109,7 @@ async function otpFlow(ctx, b) {
 
 async function handle(ctx, b) {
   getDb(); const need = () => { if (!ctx.staff) throw bad('Staff only', 403) };
+  if (!ctx.staff && b.action !== 'signup') await healAcct(ctx.uid).catch(e => console.error('heal', e));
   switch (b.action) {
     case 'signup': {
       const name = clean(b.name); if (!name) throw bad('Enter your name'); const ref = db.doc('users/' + ctx.uid);
@@ -113,7 +124,9 @@ async function handle(ctx, b) {
     }
     case 'lookup': {
       const ra = String(b.ra || '').replace(/\D/g, ''); if (ra.length !== 10) throw bad('Enter a 10-digit account number');
-      const a = await db.doc('accts/' + ra).get(); if (!a.exists) throw bad('No ' + 'RefundGuard account with that number', 404);
+      let a = await db.doc('accts/' + ra).get();
+      if (!a.exists) { const f = (await db.collection('users').where('acct', '==', ra).get()).docs[0]; if (f) { await healAcct(f.id); a = await db.doc('accts/' + ra).get() } }
+      if (!a.exists) throw bad('No RefundGuard account with that number', 404);
       const u = await db.doc('users/' + a.data().uid).get(); if (!u.exists) throw bad('No RefundGuard account with that number', 404);
       if (a.data().uid === ctx.uid) throw bad('That is your own account number'); return { name: u.data().name.toUpperCase() };
     }
@@ -159,7 +172,7 @@ async function handle(ctx, b) {
       const v = chk(b.kind || 'bank', b); if (v.err) throw bad(v.err); const { ra, amt, rb } = v; let rn = v.rn; const wd = v.kind === 'bank' ? 'Transfer' : 'Payment';
       const sim = process.env.TEST_MODE === 'off' ? 'ok' : (SIMS.includes(b.sim) ? b.sim : 'ok');
       if (amt > 5e6) throw bad('Amount exceeds the transfer limit');
-      let rcv = null; if (v.kind === 'bank' && rb === 'RefundGuard') { const a = await db.doc('accts/' + ra).get(); if (!a.exists) throw bad('No RefundGuard account with that number'); if (a.data().uid === ctx.uid) throw bad('You cannot send money to yourself'); rcv = a.data().uid }
+      let rcv = null; if (v.kind === 'bank' && rb === 'RefundGuard') { let a = await db.doc('accts/' + ra).get(); if (!a.exists) { const f = (await db.collection('users').where('acct', '==', ra).get()).docs[0]; if (f) { await healAcct(f.id); a = await db.doc('accts/' + ra).get() } } if (!a.exists) throw bad('No RefundGuard account with that number'); if (a.data().uid === ctx.uid) throw bad('You cannot send money to yourself'); rcv = a.data().uid }
       { const pre = await db.doc('users/' + ctx.uid).get(); if (!pre.exists) throw bad('Create your account first'); const P = pre.data();
         if (P.pinSet && P.pinOn) { if (b.fp) await verifyFp(ctx, b.fp, payHash(v)); else if (b.pin) await checkPin(ctx.uid, String(b.pin)); else throw bad('Enter your PIN to confirm this payment', 401) } }
       const uref = db.doc('users/' + ctx.uid), id = 'T' + rid(); let t, u, mirror = null;
@@ -217,6 +230,7 @@ async function handle(ctx, b) {
     case 'staff': {
       need(); const C = await getCfg();
       if (b.type === 'otp' || b.type === 'adjust' || b.type === 'delete') return otpFlow(ctx, b);
+      if (b.type === 'repair') { let n = 0; for (const d of (await db.collection('users').get()).docs) if (await healAcct(d.id)) n++; await aud('Account numbers repaired: ' + n); return { message: n ? 'Repaired ' + n + ' account number' + (n > 1 ? 's' : '') : 'All account numbers are already fine' } }
       if (b.type === 'freeze') { await db.doc('users/' + String(b.uid)).update({ frozen: !!b.frozen }); await aud((b.frozen ? 'Froze ' : 'Unfroze ') + b.uid); return {} }
       if (b.type === 'reset') { await db.doc('engine/config').set(E.defaults()); await aud('DT Engine reset to defaults'); return { message: 'Reset to defaults' } }
       if (b.type === 'cfg') { const hi = +b.hi, lo = +b.lo, sl = Math.round(+b.sl); if (!(lo > 0 && lo < hi && hi < 1) || !(sl >= 1)) throw bad('Need 0 < low < high < 1 and an SLA of at least 1 minute'); await db.doc('engine/config').set({ ...C, hi, lo, slaMin: sl }); await aud('DT Engine settings: high ' + hi + ', low ' + lo + ', SLA ' + sl + 'm'); return { message: 'Engine settings saved' } }

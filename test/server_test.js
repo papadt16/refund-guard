@@ -2,7 +2,7 @@
 const assert = require('assert'); const crypto = require('crypto'); const api = require('../api/rg.js');
 const store = {}; const J = v => JSON.parse(JSON.stringify(v));
 const ref = p => ({ path: p, async get() { const d = store[p]; return { exists: !!d, data: () => d && J(d), id: p.split('/')[1] } }, async set(v, o) { store[p] = o && o.merge ? { ...(store[p] || {}), ...J(v) } : J(v) }, async update(v) { if (!store[p]) throw new Error('no doc ' + p); Object.assign(store[p], J(v)) }, async delete() { delete store[p] } });
-const docsOf = (n, f) => Object.keys(store).filter(k => k.startsWith(n + '/') && f(store[k])).map(k => ({ data: () => store[k], ref: ref(k) }));
+const docsOf = (n, f) => Object.keys(store).filter(k => k.startsWith(n + '/') && f(store[k])).map(k => ({ id: k.split('/')[1], data: () => store[k], ref: ref(k) }));
 const col = n => ({ doc: id => ref(n + '/' + id), async add(v) { store[n + '/' + Math.random()] = v }, where: (f, o, v) => ({ async get() { return { docs: docsOf(n, d => d[f] === v) } } }), async get() { return { docs: docsOf(n, () => true) } } });
 api._setDb({ doc: ref, collection: col, async runTransaction(fn) { const tr = { get: r => r.get(), set: (r, v) => r.set(v), update: (r, v) => r.update(v) }; return fn(tr) } });
 const authCalls = []; api._setAuth({ updateUser: async (u, o) => { if (o.email === 'taken@x.com') throw Object.assign(new Error('x'), { code: 'auth/email-already-exists' }); authCalls.push(['update', u, o.email]) }, deleteUser: async u => authCalls.push(['delete', u]) });
@@ -77,6 +77,11 @@ async function fund(uid, amt) { const r = await t(boss, { action: 'staff', type:
   ch = await begin(); await assert.rejects(t(ctxA, { ...fpay, fp: sign(ch, 5, 0x05, crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey) }), /check failed/);
   await t(ctxA, { action: 'fp_remove', pin: '1357' }); assert.equal(store['users/u1'].fp, false); await assert.rejects(t(ctxA, { action: 'fp_auth_begin', ...pay }), /No fingerprint/);
   await t(ctxA, { action: 'pinpref', on: false, pin: '1357' }); await t(ctxA, { ...small }); assert.equal(store['users/u1'].pinOn, false, 'PIN can be switched off by its owner'); await t(ctxA, { action: 'pinpref', on: true });
+  /* legacy accounts: 11-digit and unregistered numbers get repaired, and are found by lookup */
+  store['users/u8'] = { name: 'Oshone', email: 'o@x.com', acct: '2048550203', bal: 0, tier: 1 }; store['users/u9'] = { name: 'Aigbe', acct: '20300834568', bal: 0, tier: 1 }; store['users/u7'] = { name: 'Old', acct: '20111111111', bal: 0, tier: 1 };
+  assert.equal((await t(ada, { action: 'lookup', ra: '2048550203' })).name, 'OSHONE'); assert.equal(store['accts/2048550203'].uid, 'u8', 'registered on first lookup');
+  await t(mk('u9', 'a@x.com'), { action: 'prefs', theme: 'dark' }); assert.match(store['users/u9'].acct, /^\d{10}$/); assert.equal(store['accts/' + store['users/u9'].acct].uid, 'u9'); assert.ok(!store['accts/20300834568']);
+  await assert.rejects(t(ada, { action: 'staff', type: 'repair' }), /Staff only/); const rr = await t(boss, { action: 'staff', type: 'repair' }); assert.match(rr.message, /Repaired 1/); assert.match(store['users/u7'].acct, /^\d{10}$/);
   /* delete needs OTP, frees the account number, removes auth user */
   const d1 = { action: 'staff', type: 'delete', uid: 'u2', reason: 'closed' }, od = await t(boss, { ...d1, type: 'otp', op: 'delete' });
   await assert.rejects(t(boss, { ...d1, otpId: od.otpId, code: '111111' }), /Incorrect/); await t(boss, { ...d1, otpId: od.otpId, code: lastCode() });
