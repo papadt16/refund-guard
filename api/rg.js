@@ -18,6 +18,35 @@ const getAuth = () => authAdmin || A().auth();
 const getMailer = () => mailer || (mailer = (() => { if (!process.env.SMTP_USER || !process.env.SMTP_PASS) throw bad('Email is not configured on the server (set SMTP_USER and SMTP_PASS). See SETUP.md.', 503); const port = +(process.env.SMTP_PORT || 465); return require('nodemailer').createTransport({ host: process.env.SMTP_HOST || 'smtp.gmail.com', port, secure: port === 465, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } }) })());
 const money = n => '₦' + Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2 });
 const dayStart = () => { const d = new Date(Date.now() + 36e5); d.setUTCHours(0, 0, 0, 0); return d.getTime() - 36e5 }; /* start of today in Lagos (UTC+1) */
+/* ---- transaction PIN (scrypt hash in the admin-only `secrets` collection) and fingerprint (WebAuthn, verified here with Node crypto) ---- */
+const getSec = async uid => { const s = await db.doc('secrets/' + uid).get(); return s.exists ? s.data() : {} };
+const putSec = (uid, d) => db.doc('secrets/' + uid).set(d, { merge: true });
+const hashPin = (pin, salt) => crypto.scryptSync(pin, salt, 32).toString('hex');
+const sha256 = x => crypto.createHash('sha256').update(x).digest();
+async function checkPin(uid, pin) {
+  const s = await getSec(uid); if (!s.pin) throw bad('Set a transaction PIN first');
+  if (s.lock > Date.now()) throw bad('Too many wrong PINs. Try again in ' + Math.ceil((s.lock - Date.now()) / 6e4) + ' min.', 429);
+  const ok = /^\d{4}$/.test(String(pin)) && crypto.timingSafeEqual(Buffer.from(hashPin(String(pin), s.pin.salt), 'hex'), Buffer.from(s.pin.h, 'hex'));
+  if (!ok) { const tries = (s.tries || 0) + 1; await putSec(uid, tries >= 5 ? { tries: 0, lock: Date.now() + 15 * 6e4 } : { tries }); throw bad(tries >= 5 ? 'Too many wrong PINs. Locked for 15 minutes.' : 'Incorrect PIN. ' + (5 - tries) + ' attempt' + (5 - tries === 1 ? '' : 's') + ' left.', 401) }
+  if (s.tries) await putSec(uid, { tries: 0 }); return s;
+}
+function cbor(buf) { let i = 0; const rd = () => { const b = buf[i++], mt = b >> 5; let n = b & 31; if (n === 24) n = buf[i++]; else if (n === 25) { n = buf.readUInt16BE(i); i += 2 } else if (n === 26) { n = buf.readUInt32BE(i); i += 4 } else if (n > 26) throw new Error('cbor');
+  if (mt === 0) return n; if (mt === 1) return -1 - n; if (mt === 2) { const r = buf.subarray(i, i + n); i += n; return r } if (mt === 3) { const r = buf.subarray(i, i + n).toString(); i += n; return r }
+  if (mt === 4) { const a = []; for (let k = 0; k < n; k++) a.push(rd()); return a } if (mt === 5) { const m = new Map(); for (let k = 0; k < n; k++) { const key = rd(); m.set(key, rd()) } return m } throw new Error('cbor type') }; return rd() }
+const rpOf = ctx => new URL(ctx.origin).hostname, payHash = v => sha(JSON.stringify([v.kind, v.rb, v.ra, v.amt, v.plan || '', v.nar || ''])).toString('hex');
+const b64 = s => Buffer.from(String(s || ''), 'base64url');
+function checkClient(ctx, cdj, type, chal) { let j; try { j = JSON.parse(cdj.toString()) } catch (e) { throw bad('Fingerprint check failed') } if (j.type !== type || j.challenge !== chal || j.origin !== ctx.origin) throw bad('Fingerprint check failed. Try again.') }
+async function verifyFp(ctx, fp, ph) {
+  const s = await getSec(ctx.uid), a = s.authChal; await putSec(ctx.uid, { authChal: null }); /* single use */
+  if (!a || a.exp < Date.now() || a.ph !== ph) throw bad('Fingerprint check expired. Try again.');
+  const cred = (s.creds || []).find(c => c.id === fp.id); if (!cred) throw bad('This fingerprint is not registered');
+  const cdj = b64(fp.cdj), ad = b64(fp.authData); checkClient(ctx, cdj, 'webauthn.get', a.c);
+  if (ad.length < 37 || !ad.subarray(0, 32).equals(sha256(rpOf(ctx)))) throw bad('Fingerprint check failed'); if (!(ad[32] & 1) || !(ad[32] & 4)) throw bad('Fingerprint was not verified on the device');
+  const key = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: cred.x, y: cred.y }, format: 'jwk' });
+  if (!crypto.verify('sha256', Buffer.concat([ad, sha256(cdj)]), key, b64(fp.sig))) throw bad('Fingerprint check failed');
+  const sc = ad.readUInt32BE(33); if ((sc || cred.sc) && sc <= cred.sc) throw bad('Fingerprint replay detected');
+  await putSec(ctx.uid, { creds: s.creds.map(c => c.id === cred.id ? { ...c, sc } : c) });
+}
 const aud = m => db.collection('audit').add({ t: Date.now(), m }).catch(() => {});
 const getCfg = async () => { const s = await db.doc('engine/config').get(); return { ...E.defaults(), ...(s.exists ? s.data() : {}) } };
 async function notify(to, t, cid, type) { try { const m = NM[type](t, cid.slice(0, 7)), id = 'N' + rid(); await db.doc('notifications/' + id).set({ id, uid: to, caseId: cid, txid: t.id || '', type, subject: m[0], sms: m[1], body: m[2], ts: Date.now(), read: false }) } catch (e) {} }
@@ -65,7 +94,7 @@ async function otpFlow(ctx, b) {
   }
   await db.doc('accts/' + u.acct).delete().catch(() => {}); for (const d of (await db.collection('ids').where('uid', '==', pl.uid).get()).docs) await d.ref.delete();
   try { await getAuth().deleteUser(pl.uid) } catch (e) { if (e.code !== 'auth/user-not-found') console.error(e) }
-  await uref.delete(); await aud(ctx.email + ' deleted account ' + u.acct + ' (' + u.name + ': ' + pl.reason + '), 2-step verified'); return { message: 'Account deleted' };
+  await db.doc('secrets/' + pl.uid).delete().catch(() => {}); await uref.delete(); await aud(ctx.email + ' deleted account ' + u.acct + ' (' + u.name + ': ' + pl.reason + '), 2-step verified'); return { message: 'Account deleted' };
 }
 
 async function handle(ctx, b) {
@@ -88,6 +117,37 @@ async function handle(ctx, b) {
       const u = await db.doc('users/' + a.data().uid).get(); if (!u.exists) throw bad('No RefundGuard account with that number', 404);
       if (a.data().uid === ctx.uid) throw bad('That is your own account number'); return { name: u.data().name.toUpperCase() };
     }
+    case 'setpin': {
+      const pin = String(b.pin || ''), ref = db.doc('users/' + ctx.uid), us = await ref.get(); if (!us.exists) throw bad('Create your account first');
+      if (!/^\d{4}$/.test(pin)) throw bad('PIN must be 4 digits'); if (/^(\d)\1{3}$/.test(pin) || ['1234', '4321', '0123', '3210'].includes(pin)) throw bad('Choose a less obvious PIN');
+      const s = await getSec(ctx.uid); if (s.pin) await checkPin(ctx.uid, String(b.cur || '')); const salt = crypto.randomBytes(16).toString('hex');
+      await putSec(ctx.uid, { pin: { salt, h: hashPin(pin, salt) }, tries: 0, lock: 0 }); await ref.update(s.pin ? { pinSet: true } : { pinSet: true, pinOn: true }); await aud(us.data().name + ' ' + (s.pin ? 'changed' : 'set') + ' a transaction PIN'); return {};
+    }
+    case 'pinverify': await checkPin(ctx.uid, String(b.pin || '')); return {};
+    case 'pinpref': {
+      const ref = db.doc('users/' + ctx.uid), us = await ref.get(); if (!us.exists) throw bad('Create your account first'); const u = us.data();
+      if (b.on) { if (!u.pinSet) throw bad('Set a transaction PIN first'); await ref.update({ pinOn: true }); return {} }
+      if (u.pinSet && u.pinOn) await checkPin(ctx.uid, String(b.pin || '')); await ref.update({ pinOn: false }); await aud(u.name + ' turned off PIN for payments'); return {};
+    }
+    case 'fp_reg_begin': {
+      const us = await db.doc('users/' + ctx.uid).get(); if (!us.exists) throw bad('Create your account first'); const s = await checkPin(ctx.uid, String(b.pin || '')), c = crypto.randomBytes(32).toString('base64url');
+      await putSec(ctx.uid, { regChal: { c, exp: Date.now() + 5 * 6e4 } });
+      return { challenge: c, rp: { name: 'RefundGuard', id: rpOf(ctx) }, user: { id: Buffer.from(ctx.uid).toString('base64url'), name: ctx.email || ctx.uid, displayName: us.data().name }, params: [{ type: 'public-key', alg: -7 }], sel: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, ex: (s.creds || []).map(x => x.id) };
+    }
+    case 'fp_reg_finish': {
+      const s = await getSec(ctx.uid), r = s.regChal; await putSec(ctx.uid, { regChal: null }); if (!r || r.exp < Date.now()) throw bad('Registration expired. Try again.');
+      checkClient(ctx, b64(b.cdj), 'webauthn.create', r.c); let att; try { att = cbor(b64(b.att)) } catch (e) { throw bad('Could not read the fingerprint registration') }
+      const ad = att.get && att.get('authData'); if (!ad || ad.length < 55 || !ad.subarray(0, 32).equals(sha256(rpOf(ctx)))) throw bad('Fingerprint registration failed'); if (!(ad[32] & 1) || !(ad[32] & 4) || !(ad[32] & 64)) throw bad('Fingerprint was not verified on the device');
+      const len = ad.readUInt16BE(53), id = ad.subarray(55, 55 + len).toString('base64url'), k = cbor(ad.subarray(55 + len)); if (id !== b.id) throw bad('Fingerprint registration failed');
+      if (k.get(1) !== 2 || k.get(3) !== -7 || k.get(-1) !== 1) throw bad('This device uses an unsupported key type');
+      const creds = [...(s.creds || []).filter(c => c.id !== id), { id, x: k.get(-2).toString('base64url'), y: k.get(-3).toString('base64url'), sc: 0, at: Date.now() }].slice(-5);
+      await putSec(ctx.uid, { creds }); await db.doc('users/' + ctx.uid).update({ fp: true }); await aud('Fingerprint added for ' + ctx.email); return {};
+    }
+    case 'fp_remove': { await checkPin(ctx.uid, String(b.pin || '')); await putSec(ctx.uid, { creds: [], authChal: null }); await db.doc('users/' + ctx.uid).update({ fp: false }); await aud('Fingerprint removed for ' + ctx.email); return {} }
+    case 'fp_auth_begin': {
+      const v = chk(b.kind || 'bank', b); if (v.err) throw bad(v.err); const s = await getSec(ctx.uid); if (!(s.creds || []).length) throw bad('No fingerprint is set up'); const c = crypto.randomBytes(32).toString('base64url');
+      await putSec(ctx.uid, { authChal: { c, ph: payHash(v), exp: Date.now() + 2 * 6e4 } }); return { challenge: c, rpId: rpOf(ctx), allow: s.creds.map(x => x.id) };
+    }
     case 'upgrade': {
       const to = +b.to, ref = db.doc('users/' + ctx.uid), s = await ref.get(); if (!s.exists) throw bad('Create your account first'); const u = s.data(), cur = u.tier || 1;
       if (to !== cur + 1 || to > 3) throw bad('You can only upgrade one tier at a time');
@@ -100,6 +160,8 @@ async function handle(ctx, b) {
       const sim = process.env.TEST_MODE === 'off' ? 'ok' : (SIMS.includes(b.sim) ? b.sim : 'ok');
       if (amt > 5e6) throw bad('Amount exceeds the transfer limit');
       let rcv = null; if (v.kind === 'bank' && rb === 'RefundGuard') { const a = await db.doc('accts/' + ra).get(); if (!a.exists) throw bad('No RefundGuard account with that number'); if (a.data().uid === ctx.uid) throw bad('You cannot send money to yourself'); rcv = a.data().uid }
+      { const pre = await db.doc('users/' + ctx.uid).get(); if (!pre.exists) throw bad('Create your account first'); const P = pre.data();
+        if (P.pinSet && P.pinOn) { if (b.fp) await verifyFp(ctx, b.fp, payHash(v)); else if (b.pin) await checkPin(ctx.uid, String(b.pin)); else throw bad('Enter your PIN to confirm this payment', 401) } }
       const uref = db.doc('users/' + ctx.uid), id = 'T' + rid(); let t, u, mirror = null;
       const today = (await db.collection('txs').where('uid', '==', ctx.uid).get()).docs.map(d => d.data()).filter(x => x.ts >= dayStart() && x.debited && x.dir !== 'in' && x.status !== 'refunded').reduce((s, x) => s + x.amt, 0);
       await db.runTransaction(async tr => {
@@ -174,7 +236,8 @@ module.exports = async (req, res) => {
   try {
     if (req.method !== 'POST') throw bad('POST only', 405); getDb();
     const tok = await A().auth().verifyIdToken((req.headers.authorization || '').replace(/^Bearer /, '')), email = (tok.email || '').toLowerCase();
-    const out = await handle({ uid: tok.uid, email, staff: staffList().includes(email) }, req.body || {}); res.status(200).json({ ok: true, ...out });
+    const host = req.headers['x-forwarded-host'] || req.headers.host || '', origin = process.env.WEBAUTHN_ORIGIN || ((/^(localhost|127\.)/.test(host) ? 'http://' : 'https://') + host);
+    const out = await handle({ uid: tok.uid, email, staff: staffList().includes(email), origin }, req.body || {}); res.status(200).json({ ok: true, ...out });
   } catch (e) { const code = e.status || (/^auth\//.test(e.code || '') ? 401 : 500); if (code === 500) console.error(e); res.status(code).json({ error: code === 500 ? 'Server error' : e.message }) }
 };
 module.exports.handle = handle; module.exports._setDb = d => { db = d }; module.exports._setAuth = a => { authAdmin = a }; module.exports._setMailer = m => { mailer = m };

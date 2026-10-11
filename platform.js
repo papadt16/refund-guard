@@ -58,7 +58,7 @@
     if (bad) { msg('<div class="card">Firebase is not configured yet. Fill in <b>firebase-config.js</b> (see SETUP.md).</div>'); return null }
     try {
       const u = await ensure(); if (name === 'db') return fs;
-      if (name === 'user') return { id: async () => u.uid, canEdit: async () => !!u.email && emails.includes(u.email.toLowerCase()), can: async () => true, isOwner: () => false, resetPassword: async () => auth.sendPasswordResetEmail(u.email) };
+      if (name === 'user') return { id: async () => u.uid, canEdit: async () => !!u.email && emails.includes(u.email.toLowerCase()), can: async () => true, isOwner: () => false, changePassword: async (cur, nw) => { const x = auth.currentUser; try { await x.reauthenticateWithCredential(firebase.auth.EmailAuthProvider.credential(x.email, cur)); await x.updatePassword(nw) } catch (e) { throw new Error(/invalid-credential|wrong-password/.test(e.code || '') ? 'Current password is incorrect.' : e.code === 'auth/weak-password' ? 'Choose a stronger password.' : e.code === 'auth/too-many-requests' ? 'Too many attempts. Try again later.' : 'Could not update the password.') } }, resetPassword: async () => auth.sendPasswordResetEmail(u.email) };
     } catch (e) { console.error('Firebase init/sign-in failed:', e); return null }
     return null;
   } };

@@ -51,3 +51,9 @@ Codes expire after 10 minutes, work once, are tied to the exact request, and loc
 - Account numbers are unique (reserved atomically in the `accts` collection). Choosing **RefundGuard** as the bank looks the number up and fills in the real name; money sent to another RefundGuard account is credited to them.
 - Tiers (demo limits): Tier 1 up to N50,000 per transaction and N200,000 per day; Tier 2 (phone + BVN) N200,000 / N1,000,000; Tier 3 (NIN + address + profile picture) N5,000,000 / N10,000,000.
 - BVN and NIN are format-checked only (no NIBSS/NIMC call). The server keeps just the last 4 digits and a hash, which stops one ID being linked to two accounts.
+
+## Payments: PIN, fingerprint, password
+- **Transaction PIN** (Profile > Payment Settings): 4 digits, stored as a salted scrypt hash in the admin-only `secrets` collection. When "Use PIN for transactions" is on, the server refuses any payment without a valid PIN or fingerprint. Turning it off needs the PIN. 5 wrong tries lock payments for 15 minutes.
+- **Fingerprint** uses WebAuthn (the phone's fingerprint, face or screen lock). It needs HTTPS (Vercel is fine) and is registered per domain, so add it again if the domain changes. The server verifies the signature and ties each approval to that exact payment, so it cannot be replayed. Adding or removing it needs the PIN. Only devices that support it show the option.
+- **Login password** (Profile > Login Password): re-checks the current password, then sets the new one. The "forgot it?" link emails a reset.
+- Optional env var `WEBAUTHN_ORIGIN` (for example `https://refundguard.vercel.app`) pins the expected site address if you use a custom domain behind a proxy.

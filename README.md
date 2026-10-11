@@ -62,3 +62,5 @@ The web build runs DT Engine and all money movement on the server (`api/rg.js`);
 
 ## Latest changes
 Profile (name, email, phone, BVN, NIN, picture), KYC tiers with limits, PalmPay-style transaction history, RefundGuard as a bank with name lookup and unique account numbers, zero starting balance, accountant balance adjustment and account deletion with emailed one-time codes, sign-out confirmation, test-mode selector moved to the payment confirmation sheet.
+
+Checkout redesign (payment sheet, PIN keypad, fingerprint), Payment Settings (use PIN on/off, set/change PIN, fingerprint), change login password.

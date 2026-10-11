@@ -1,7 +1,7 @@
 /* In-memory Firestore mock: node test/server_test.js */
-const assert = require('assert'); const api = require('../api/rg.js');
+const assert = require('assert'); const crypto = require('crypto'); const api = require('../api/rg.js');
 const store = {}; const J = v => JSON.parse(JSON.stringify(v));
-const ref = p => ({ path: p, async get() { const d = store[p]; return { exists: !!d, data: () => d && J(d), id: p.split('/')[1] } }, async set(v) { store[p] = J(v) }, async update(v) { if (!store[p]) throw new Error('no doc ' + p); Object.assign(store[p], J(v)) }, async delete() { delete store[p] } });
+const ref = p => ({ path: p, async get() { const d = store[p]; return { exists: !!d, data: () => d && J(d), id: p.split('/')[1] } }, async set(v, o) { store[p] = o && o.merge ? { ...(store[p] || {}), ...J(v) } : J(v) }, async update(v) { if (!store[p]) throw new Error('no doc ' + p); Object.assign(store[p], J(v)) }, async delete() { delete store[p] } });
 const docsOf = (n, f) => Object.keys(store).filter(k => k.startsWith(n + '/') && f(store[k])).map(k => ({ data: () => store[k], ref: ref(k) }));
 const col = n => ({ doc: id => ref(n + '/' + id), async add(v) { store[n + '/' + Math.random()] = v }, where: (f, o, v) => ({ async get() { return { docs: docsOf(n, d => d[f] === v) } } }), async get() { return { docs: docsOf(n, () => true) } } });
 api._setDb({ doc: ref, collection: col, async runTransaction(fn) { const tr = { get: r => r.get(), set: (r, v) => r.set(v), update: (r, v) => r.update(v) }; return fn(tr) } });
@@ -47,10 +47,40 @@ async function fund(uid, amt) { const r = await t(boss, { action: 'staff', type:
   await assert.rejects(t(ada, { action: 'upgrade', to: 3 }), /one tier/); await t(ada, { action: 'upgrade', to: 2 }); assert.equal(store['users/u1'].tier, 2);
   await assert.rejects(t(ada, { action: 'upgrade', to: 3 }), /NIN|address|picture/); await t(ada, { action: 'transfer', ...base, amt: 60000, sim: 'ok' });
   await assert.rejects(t(ada, { action: 'profile', photo: 'data:text/html;base64,AAA' }), /smaller image/); await t(ada, { action: 'profile', photo: 'data:image/jpeg;base64,/9j/4AAQ' });
+  /* transaction PIN: hashed, required when on, lockout, toggle needs PIN */
+  const ctxA = { ...ada, origin: 'https://rg.test' }, small = { action: 'transfer', rn: 'bello', rb: 'OPay', ra: '8108080082', amt: 100, sim: 'ok' };
+  await assert.rejects(t(ctxA, { action: 'setpin', pin: '1111' }), /less obvious/); await assert.rejects(t(ctxA, { action: 'setpin', pin: '12' }), /4 digits/);
+  await t(ctxA, { action: 'setpin', pin: '2580' }); assert.equal(store['users/u1'].pinOn, true); assert.ok(!JSON.stringify(store['users/u1']).includes('2580') && !JSON.stringify(store['users/u1']).includes('"h"'), 'PIN hash lives only in secrets');
+  await assert.rejects(t(ctxA, small), /Enter your PIN/); await assert.rejects(t(ctxA, { ...small, pin: '0000' }), /Incorrect PIN. 4 attempts left/); await t(ctxA, { ...small, pin: '2580' });
+  for (let i = 0; i < 4; i++) await assert.rejects(t(ctxA, { ...small, pin: '9999' }), /Incorrect PIN/);
+  await assert.rejects(t(ctxA, { ...small, pin: '9999' }), /Locked for 15 minutes/); await assert.rejects(t(ctxA, { ...small, pin: '2580' }), /Try again in/); store['secrets/u1'].lock = 0;
+  await assert.rejects(t(ctxA, { action: 'setpin', pin: '1357', cur: '0000' }), /Incorrect PIN/); await t(ctxA, { action: 'setpin', pin: '1357', cur: '2580' }); await t(ctxA, { ...small, pin: '1357' });
+  await assert.rejects(t(ctxA, { action: 'pinpref', on: false, pin: '0000' }), /Incorrect PIN/);
+  /* fingerprint (WebAuthn) with a simulated authenticator */
+  const enc = v => { const h = (mt, n) => n < 24 ? Buffer.from([mt << 5 | n]) : n < 256 ? Buffer.from([mt << 5 | 24, n]) : Buffer.from([mt << 5 | 25, n >> 8, n & 255]);
+    if (typeof v === 'number') return v >= 0 ? h(0, v) : h(1, -1 - v); if (Buffer.isBuffer(v)) return Buffer.concat([h(2, v.length), v]); if (typeof v === 'string') { const b = Buffer.from(v); return Buffer.concat([h(3, b.length), b]) }
+    if (v instanceof Map) return Buffer.concat([h(5, v.size), ...[...v].flatMap(([k, x]) => [enc(k), enc(x)])]); throw new Error('enc') };
+  const sh = x => crypto.createHash('sha256').update(x).digest(), u32 = n => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b }, kp = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }), jwk = kp.publicKey.export({ format: 'jwk' }), credId = crypto.randomBytes(16), rp = sh('rg.test');
+  const cdjOf = (type, ch) => Buffer.from(JSON.stringify({ type, challenge: ch, origin: 'https://rg.test' })), cose = new Map([[1, 2], [3, -7], [-1, 1], [-2, Buffer.from(jwk.x, 'base64url')], [-3, Buffer.from(jwk.y, 'base64url')]]);
+  const att = enc(new Map([['fmt', 'none'], ['attStmt', new Map()], ['authData', Buffer.concat([rp, Buffer.from([0x45]), u32(0), Buffer.alloc(16), Buffer.from([0, credId.length]), credId, enc(cose)])]])), cid = credId.toString('base64url');
+  await assert.rejects(t(ctxA, { action: 'fp_reg_begin', pin: '0000' }), /Incorrect PIN/);
+  let ro = await t(ctxA, { action: 'fp_reg_begin', pin: '1357' }); await assert.rejects(t(ctxA, { action: 'fp_reg_finish', id: cid, cdj: cdjOf('webauthn.create', 'wrong').toString('base64url'), att: att.toString('base64url') }), /failed/);
+  ro = await t(ctxA, { action: 'fp_reg_begin', pin: '1357' }); await t(ctxA, { action: 'fp_reg_finish', id: cid, cdj: cdjOf('webauthn.create', ro.challenge).toString('base64url'), att: att.toString('base64url') }); assert.equal(store['users/u1'].fp, true);
+  const pay = { kind: 'bank', rb: 'OPay', ra: '8108080082', rn: 'bello', amt: 100, plan: '', nar: '' }, fpay = { action: 'transfer', ...pay, sim: 'ok' };
+  const sign = (ch, sc, flags = 0x05, key = kp.privateKey) => { const cdj = cdjOf('webauthn.get', ch), ad = Buffer.concat([rp, Buffer.from([flags]), u32(sc)]); return { id: cid, authData: ad.toString('base64url'), cdj: cdj.toString('base64url'), sig: crypto.sign('sha256', Buffer.concat([ad, sh(cdj)]), key).toString('base64url') } };
+  const begin = async () => (await t(ctxA, { action: 'fp_auth_begin', ...pay })).challenge;
+  let ch = await begin(); const bal0 = store['users/u1'].bal; await t(ctxA, { ...fpay, fp: sign(ch, 1) }); assert.equal(store['users/u1'].bal, bal0 - 100, 'fingerprint authorises the payment');
+  await assert.rejects(t(ctxA, { ...fpay, fp: sign(ch, 2) }), /expired/, 'challenge is single use');
+  ch = await begin(); await assert.rejects(t(ctxA, { ...fpay, amt: 200, fp: sign(ch, 3) }), /expired/, 'bound to the exact payment');
+  ch = await begin(); await assert.rejects(t(ctxA, { ...fpay, fp: sign(ch, 4, 0x01) }), /not verified/);
+  ch = await begin(); await assert.rejects(t(ctxA, { ...fpay, fp: sign(ch, 1) }), /replay/);
+  ch = await begin(); await assert.rejects(t(ctxA, { ...fpay, fp: sign(ch, 5, 0x05, crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey) }), /check failed/);
+  await t(ctxA, { action: 'fp_remove', pin: '1357' }); assert.equal(store['users/u1'].fp, false); await assert.rejects(t(ctxA, { action: 'fp_auth_begin', ...pay }), /No fingerprint/);
+  await t(ctxA, { action: 'pinpref', on: false, pin: '1357' }); await t(ctxA, { ...small }); assert.equal(store['users/u1'].pinOn, false, 'PIN can be switched off by its owner'); await t(ctxA, { action: 'pinpref', on: true });
   /* delete needs OTP, frees the account number, removes auth user */
   const d1 = { action: 'staff', type: 'delete', uid: 'u2', reason: 'closed' }, od = await t(boss, { ...d1, type: 'otp', op: 'delete' });
   await assert.rejects(t(boss, { ...d1, otpId: od.otpId, code: '111111' }), /Incorrect/); await t(boss, { ...d1, otpId: od.otpId, code: lastCode() });
   assert.ok(!store['users/u2'] && !store['accts/' + lk.acct]); assert.ok(authCalls.some(c => c[0] === 'delete' && c[1] === 'u2')); await assert.rejects(t(ada, { action: 'lookup', ra: '1' }), /10-digit/);
-  await t(boss, { action: 'staff', type: 'freeze', uid: 'u1', frozen: true }); await assert.rejects(t(ada, { ...base }), /frozen/);
+  await t(boss, { action: 'staff', type: 'freeze', uid: 'u1', frozen: true }); await assert.rejects(t(ada, { ...base, pin: '1357' }), /frozen/);
   console.log('ALL SERVER TESTS PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1) });
