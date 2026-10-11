@@ -2,7 +2,7 @@
    Clients only READ from Firestore; the security rules deny client writes. One endpoint: POST /api/rg {action,...} with a Firebase ID token. */
 const A = () => require('firebase-admin'); /* lazy so the logic can be unit-tested without the SDK */
 const E = require('../engine/dt_engine.js');
-const { NM } = require('./_shared.js');
+const { NM, CAT, chk } = require('./_shared.js');
 let db = null;
 const getDb = () => db || (db = (A().apps.length || A().initializeApp({ credential: A().credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) }), A().firestore()));
 const staffList = () => (process.env.STAFF_EMAILS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
@@ -38,19 +38,19 @@ async function handle(ctx, b) {
       await aud('New customer ' + name); return {};
     }
     case 'transfer': {
-      const rn = clean(b.rn).toUpperCase(), ra = String(b.ra || '').replace(/\D/g, ''), amt = r2(+b.amt), rb = clean(b.rb);
+      const v = chk(b.kind || 'bank', b); if (v.err) throw bad(v.err); const { rn, ra, amt, rb } = v, wd = v.kind === 'bank' ? 'Transfer' : 'Payment';
       const sim = process.env.TEST_MODE === 'off' ? 'ok' : (SIMS.includes(b.sim) ? b.sim : 'ok');
-      if (!rn || !rb || !(amt > 0)) throw bad('Fill all fields'); if (ra.length !== 10) throw bad('Account number must be 10 digits'); if (amt > 5e6) throw bad('Amount exceeds the transfer limit');
+      if (amt > 5e6) throw bad('Amount exceeds the transfer limit');
       const uref = db.doc('users/' + ctx.uid), id = 'T' + rid(); let t, u;
       await db.runTransaction(async tr => {
         const s = await tr.get(uref); if (!s.exists) throw bad('Create your account first'); u = s.data();
         if (u.frozen) throw bad('Account frozen. Contact the bank.'); if (amt > u.bal) throw bad('Insufficient balance');
-        t = { id, uid: ctx.uid, amt, rn, rb, ra, sess: '1000332' + Date.now() + Math.floor(Math.random() * 1e5), ref: rid().slice(0, 11), ts: Date.now(), sim, status: sim === 'ok' ? 'success' : 'failed', debited: sim !== 'clean', caseId: null };
+        t = { id, uid: ctx.uid, amt, rn, rb, ra, kind: v.kind, plan: v.plan, sess: '1000332' + Date.now() + Math.floor(Math.random() * 1e5), ref: rid().slice(0, 11), ts: Date.now(), sim, status: sim === 'ok' ? 'success' : 'failed', debited: sim !== 'clean', caseId: null };
         if (t.debited) tr.update(uref, { bal: r2(u.bal - amt) }); tr.set(db.doc('txs/' + id), t);
       });
       await aud('Transfer ' + id + ' ' + amt + ' by ' + u.name + ' -> ' + t.status);
-      if (t.status === 'failed' && t.debited) { await runCase(t, 'auto'); return { txId: id, message: 'Transfer failed. You were debited — DT Engine has flagged it automatically.' } }
-      return { txId: id, message: t.status === 'success' ? 'Transfer successful' : 'Transfer failed. You were not debited.' };
+      if (t.status === 'failed' && t.debited) { await runCase(t, 'auto'); return { txId: id, message: wd + ' failed. You were debited — DT Engine has flagged it automatically.' } }
+      return { txId: id, message: t.status === 'success' ? wd + ' successful' : wd + ' failed. You were not debited.' };
     }
     case 'dispute': {
       const ts = await db.doc('txs/' + String(b.txId)).get(); if (!ts.exists || ts.data().uid !== ctx.uid) throw bad('Transaction not found', 404);

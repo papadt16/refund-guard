@@ -27,6 +27,11 @@ const r = await DTEngine.investigate(tx, allTxs, DTEngine.defaults(), async (msg
 - `DTEngine.sampleSettlement(txs)` -> a fake settlement CSV for demos (uses the demo-only `tx.sim`).
 The staff screens that use these (Patterns tab, Reconciliation tab) belong to the accountant side.
 
+## Customer app (mobile banking layout)
+Bottom navigation: **Home** (balance with hide/show, service tiles, a banner for payments DT Engine is verifying, recent transactions), **History** (filters: All, Failed, Under review, Successful) and **Me** (profile, messages, demo test mode).
+Services: To Bank, Airtime, Data, Electricity, Betting and Cable TV. Any of them can fail while still debiting, so all of them feed DT Engine. Receipts adapt to the service (provider wording, electricity token) and keep the dispute button.
+The demo test mode (Me tab) replaces the old per-form dropdown. It is a demo-only control; set `TEST_MODE=off` on the server to disable it.
+
 ## Customer notifications
 Each case stage writes an SMS-style and an email-style message to the `notifications` collection; customers read them in the in-app inbox.
 These are in-app only. A real deployment would send them through an SMS gateway and an email service.

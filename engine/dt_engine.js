@@ -68,7 +68,7 @@ async function investigate(tx,all,cfg,log,delay=550,ad=adapters){
  await L('CHECK 2 Core switch status: '+core.status+'.',core.status==='FAILED'?'w':'k');
  const [nip,ben,rev,dup]=await Promise.all([ad.nip(tx),ad.beneficiary(tx),ad.reversal(tx),ad.dup(tx,all)]);
  await L('CHECK 3 NIP status query, session '+tx.sess+': '+(nip.v===1?'APPROVED':nip.v===.5?'PENDING':'NOT FOUND'),nip.v===1?'k':'w');
- await L('CHECK 4 Beneficiary bank ('+tx.rb+') credit: '+fmt(ben.v),ben.v===1?'k':'w');
+ await L((tx.kind&&tx.kind!=='bank'?'CHECK 4 Service provider ('+tx.rb+') delivery: ':'CHECK 4 Beneficiary bank ('+tx.rb+') credit: ')+fmt(ben.v),ben.v===1?'k':'w');
  await L('CHECK 5 Reversal sweep: '+(rev.v?'reversal found':'no reversal entry within SLA window'),rev.v?'k':'e');
  await L('CHECK 6 Duplicate/fraud screen: '+(dup.v?'similar transfer in last hour':'clear'),dup.v?'w':'k');
  const f={tsq:nip.v,ben:ben.v,rev:rev.v,dup:dup.v},p=score(f,cfg);
