@@ -53,7 +53,7 @@
     if (bad) { msg('<div class="card">Firebase is not configured yet. Fill in <b>firebase-config.js</b> (see SETUP.md).</div>'); return null }
     try {
       const u = await ensure(); if (name === 'db') return fs;
-      if (name === 'user') return { id: async () => u.uid, canEdit: async () => !!u.email && emails.includes(u.email.toLowerCase()), can: async () => true, isOwner: () => false };
+      if (name === 'user') return { id: async () => u.uid, canEdit: async () => !!u.email && emails.includes(u.email.toLowerCase()), can: async () => true, isOwner: () => false, resetPassword: async () => auth.sendPasswordResetEmail(u.email) };
     } catch (e) { console.error('Firebase init/sign-in failed:', e); return null }
     return null;
   } };

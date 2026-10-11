@@ -23,12 +23,24 @@ const cust = { uid: 'u1', email: 'c@x.com', staff: false }, boss = { uid: 's1', 
   /* services: airtime, data (price comes from the server catalog), electricity, betting, validation */
   r = await t(cust, { action: 'transfer', kind: 'airtime', rb: 'MTN', ra: '08031234567', amt: 500, sim: 'ok' }); assert.equal(store['txs/' + r.txId].kind, 'airtime'); assert.equal(store['txs/' + r.txId].rn, 'MTN Airtime'); assert.match(r.message, /Payment successful/);
   const bal = store['users/u1'].bal;
-  r = await t(cust, { action: 'transfer', kind: 'data', rb: 'MTN', ra: '08031234567', plan: '2GB · 7 days', amt: 1, sim: 'ghost' }); assert.equal(store['txs/' + r.txId].amt, 1000, 'plan price must come from the catalog'); assert.equal(store['users/u1'].bal, bal - 1000);
+  r = await t(cust, { action: 'transfer', kind: 'data', rb: 'MTN', ra: '08031234567', plan: '3.5GB · 7 days', amt: 1, sim: 'ghost' }); assert.equal(store['txs/' + r.txId].amt, 1500, 'plan price must come from the catalog'); assert.equal(store['users/u1'].bal, bal - 1500);
   const dc = Object.values(store).find(v => v.txid === r.txId); assert.equal(dc.status, 'awaiting'); assert.equal(dc.verdict, 'refund'); assert.ok(dc.logs.some(l => /Service provider/.test(l.m)), 'engine wording for non-bank services');
   r = await t(cust, { action: 'transfer', kind: 'power', rb: 'IKEDC', ra: '45012345678', mt: 'Postpaid', amt: 2000, sim: 'mismatch' }); assert.equal(store['txs/' + r.txId].status, 'success'); assert.equal(store['txs/' + r.txId].plan, 'Postpaid');
   await assert.rejects(t(cust, { action: 'transfer', kind: 'airtime', rb: 'MTN', ra: '0803', amt: 500 }), /11 digits/); await assert.rejects(t(cust, { action: 'transfer', kind: 'airtime', rb: 'Hack', ra: '08031234567', amt: 500 }), /provider/);
   await assert.rejects(t(cust, { action: 'transfer', kind: 'nope', rb: 'x', ra: '1', amt: 1 }), /Unknown service/); await assert.rejects(t(cust, { action: 'transfer', kind: 'airtime', rb: 'MTN', ra: '08031234567', amt: 10 }), /Minimum/);
   r = await t(cust, { action: 'transfer', kind: 'bet', rb: 'Bet9ja', ra: 'ID123456', amt: 1000, sim: 'clean' }); assert.match(r.message, /not debited/);
+  /* TV plans belong to a provider; narration saved; profile, prefs and beneficiaries persist on the account (synced across devices) */
+  await assert.rejects(t(cust, { action: 'transfer', kind: 'tv', rb: 'DSTV', ra: '7012345678', plan: 'Nova', amt: 1 }), /plan/i);
+  r = await t(cust, { action: 'transfer', kind: 'tv', rb: 'GOtv', ra: '7012345678', plan: 'Jinja', amt: 1, sim: 'ok' }); assert.equal(store['txs/' + r.txId].amt, 3900);
+  r = await t(cust, { ...base, nar: 'rent <b>', sim: 'ok' }); assert.equal(store['txs/' + r.txId].nar, 'rent b');
+  await t(cust, { action: 'profile', nick: 'Aigbe', phone: '0903 889 9075', gender: 'Male', dob: '1999-10-05', address: '12 Allen Ave <x>' });
+  assert.equal(store['users/u1'].nick, 'Aigbe'); assert.equal(store['users/u1'].phone, '09038899075'); assert.equal(store['users/u1'].address, '12 Allen Ave x');
+  await assert.rejects(t(cust, { action: 'profile', phone: '123' }), /11 digits/); await assert.rejects(t(cust, { action: 'profile', dob: '2999-01-01' }), /date of birth/); await assert.rejects(t(cust, { action: 'profile', gender: 'x' }), /gender/);
+  await t(cust, { action: 'prefs', theme: 'dark', hb: true }); await t(cust, { action: 'prefs', sim: 'ghost' }); assert.deepEqual(store['users/u1'].prefs, { theme: 'dark', hb: true, sim: 'ghost' });
+  await assert.rejects(t(cust, { action: 'prefs', theme: 'neon' }), /theme/);
+  await t(cust, { action: 'ben', rb: 'GTBank', ra: '8100000001', rn: 'ada obi' }); await t(cust, { action: 'ben', rb: 'GTBank', ra: '8100000001', rn: 'ada obi' }); assert.equal(store['users/u1'].bens.length, 1, 'no duplicate beneficiaries'); assert.equal(store['users/u1'].bens[0].name, 'ADA OBI');
+  await assert.rejects(t(cust, { action: 'ben', rb: 'GTBank', ra: '12', rn: 'x' }), /10 digits/); await t(cust, { action: 'ben', remove: 'GTBank|8100000001' }); assert.equal(store['users/u1'].bens.length, 0);
+  await assert.rejects(t({ uid: 'nobody', staff: false }, { action: 'profile', nick: 'x' }), /Create your account/);
   await t(boss, { action: 'staff', type: 'freeze', uid: 'u1', frozen: true }); await assert.rejects(t(cust, { ...base }), /frozen/);
   console.log('ALL SERVER TESTS PASSED');
 })().catch(e => { console.error('FAIL', e); process.exit(1) });

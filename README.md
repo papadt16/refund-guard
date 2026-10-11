@@ -28,9 +28,16 @@ const r = await DTEngine.investigate(tx, allTxs, DTEngine.defaults(), async (msg
 The staff screens that use these (Patterns tab, Reconciliation tab) belong to the accountant side.
 
 ## Customer app (mobile banking layout)
-Bottom navigation: **Home** (balance with hide/show, service tiles, a banner for payments DT Engine is verifying, recent transactions), **History** (filters: All, Failed, Under review, Successful) and **Me** (profile, messages, demo test mode).
-Services: To Bank, Airtime, Data, Electricity, Betting and Cable TV. Any of them can fail while still debiting, so all of them feed DT Engine. Receipts adapt to the service (provider wording, electricity token) and keep the dispute button.
-The demo test mode (Me tab) replaces the old per-form dropdown. It is a demo-only control; set `TEST_MODE=off` on the server to disable it.
+Bottom navigation: **Home** (balance with hide/show, service tiles, a banner for payments DT Engine is verifying, recent transactions), **History** (filters by status and by service) and **Me** (profile, beneficiaries, security, dark mode, customer service, demo test mode).
+Each service tile opens its own full page:
+- **To Bank:** account number, bank, recipient name, then amount and narration; Recent and Beneficiaries tabs with search; "Save as beneficiary" on the confirm sheet.
+- **Airtime:** network (auto-detected from the number), your own number pre-filled from your profile, recent numbers, amount tiles or a custom amount.
+- **Data:** Daily, Weekly, Monthly and 3 Months plan groups.
+- **Electricity:** distribution company, prepaid or postpaid, meter number, recent meters, amount tiles.
+- **Betting:** company, user ID, amount tiles. **Cable TV:** provider, smartcard, packages per provider.
+Every payment shows a confirm sheet first. Nothing is pre-filled except the customer's own details (their mobile number). Receipts adapt to the service (provider wording, electricity token) and keep the dispute button.
+Any service can fail while debiting, so all of them feed DT Engine. The demo test mode (Me tab) is demo-only; set `TEST_MODE=off` on the server to disable it.
+Profile, preferences and beneficiaries are saved on the account, so they follow the customer to any device (see `docs/DATA_CONTRACT.md`).
 
 ## Customer notifications
 Each case stage writes an SMS-style and an email-style message to the `notifications` collection; customers read them in the in-app inbox.

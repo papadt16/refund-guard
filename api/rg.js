@@ -2,7 +2,7 @@
    Clients only READ from Firestore; the security rules deny client writes. One endpoint: POST /api/rg {action,...} with a Firebase ID token. */
 const A = () => require('firebase-admin'); /* lazy so the logic can be unit-tested without the SDK */
 const E = require('../engine/dt_engine.js');
-const { NM, CAT, chk } = require('./_shared.js');
+const { NM, CAT, chk, vProf, vPrefs, vBen } = require('./_shared.js');
 let db = null;
 const getDb = () => db || (db = (A().apps.length || A().initializeApp({ credential: A().credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) }), A().firestore()));
 const staffList = () => (process.env.STAFF_EMAILS || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
@@ -45,12 +45,21 @@ async function handle(ctx, b) {
       await db.runTransaction(async tr => {
         const s = await tr.get(uref); if (!s.exists) throw bad('Create your account first'); u = s.data();
         if (u.frozen) throw bad('Account frozen. Contact the bank.'); if (amt > u.bal) throw bad('Insufficient balance');
-        t = { id, uid: ctx.uid, amt, rn, rb, ra, kind: v.kind, plan: v.plan, sess: '1000332' + Date.now() + Math.floor(Math.random() * 1e5), ref: rid().slice(0, 11), ts: Date.now(), sim, status: sim === 'ok' ? 'success' : 'failed', debited: sim !== 'clean', caseId: null };
+        t = { id, uid: ctx.uid, amt, rn, rb, ra, kind: v.kind, plan: v.plan, nar: v.nar, sess: '1000332' + Date.now() + Math.floor(Math.random() * 1e5), ref: rid().slice(0, 11), ts: Date.now(), sim, status: sim === 'ok' ? 'success' : 'failed', debited: sim !== 'clean', caseId: null };
         if (t.debited) tr.update(uref, { bal: r2(u.bal - amt) }); tr.set(db.doc('txs/' + id), t);
       });
       await aud('Transfer ' + id + ' ' + amt + ' by ' + u.name + ' -> ' + t.status);
       if (t.status === 'failed' && t.debited) { await runCase(t, 'auto'); return { txId: id, message: wd + ' failed. You were debited — DT Engine has flagged it automatically.' } }
       return { txId: id, message: t.status === 'success' ? wd + ' successful' : wd + ' failed. You were not debited.' };
+    }
+    case 'profile': { const v = vProf(b); if (v.err) throw bad(v.err); const r = db.doc('users/' + ctx.uid); if (!(await r.get()).exists) throw bad('Create your account first'); await r.update(v.o); return { message: 'Saved' } }
+    case 'prefs': {
+      const v = vPrefs(b); if (v.err) throw bad(v.err); const r = db.doc('users/' + ctx.uid);
+      await db.runTransaction(async tr => { const x = await tr.get(r); if (!x.exists) throw bad('Create your account first'); tr.update(r, { prefs: { ...(x.data().prefs || {}), ...v.o } }) }); return { message: 'Saved' }
+    }
+    case 'ben': {
+      const r = db.doc('users/' + ctx.uid), v = b.remove ? null : vBen(b); if (v && v.err) throw bad(v.err);
+      await db.runTransaction(async tr => { const x = await tr.get(r); if (!x.exists) throw bad('Create your account first'); let l = x.data().bens || []; l = b.remove ? l.filter(i => i.id !== String(b.remove)) : [v.o, ...l.filter(i => i.id !== v.o.id)].slice(0, 30); tr.update(r, { bens: l }) }); return { message: 'Saved' }
     }
     case 'dispute': {
       const ts = await db.doc('txs/' + String(b.txId)).get(); if (!ts.exists || ts.data().uid !== ctx.uid) throw bad('Transaction not found', 404);
