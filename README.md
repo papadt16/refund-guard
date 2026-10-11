@@ -59,3 +59,6 @@ The engine export downloads as `dt_engine.js.txt` (the download feature does not
 
 ## Server mode
 The web build runs DT Engine and all money movement on the server (`api/rg.js`); the browser only reads. See `SETUP.md`. Tests: `node test/server_test.js`.
+
+## Latest changes
+Profile (name, email, phone, BVN, NIN, picture), KYC tiers with limits, PalmPay-style transaction history, RefundGuard as a bank with name lookup and unique account numbers, zero starting balance, accountant balance adjustment and account deletion with emailed one-time codes, sign-out confirmation, test-mode selector moved to the payment confirmation sheet.

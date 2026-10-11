@@ -42,7 +42,12 @@
     };
     draw();
   });
-  const topBar = () => { const t = document.querySelector('.top'); if (!t || $('so')) return; const b = document.createElement('button'); b.id = 'so'; b.textContent = 'Sign out'; b.onclick = () => auth.signOut().then(() => location.reload()); t.appendChild(b) };
+  window.confirmSignOut = () => { /* ask first, so a stray tap does not log anyone out */
+    if ($('so-m')) return; const m = document.createElement('div'); m.id = 'so-m'; m.className = 'modal sheet';
+    m.innerHTML = '<div><b style="font-size:17px">Sign out?</b><div class="hint" style="margin:6px 0 14px">Are you sure you want to sign out of RefundGuard?</div><button class="p" style="width:100%;padding:11px" id="so-y">Yes, sign out</button><button style="width:100%;margin-top:8px" id="so-n">Stay signed in</button></div>';
+    document.body.appendChild(m); m.onclick = e => { if (e.target === m) m.remove() }; $('so-n').onclick = () => m.remove(); $('so-y').onclick = () => auth.signOut().then(() => location.reload());
+  };
+  const topBar = () => { const t = document.querySelector('.top'); if (!t || $('so')) return; const b = document.createElement('button'); b.id = 'so'; b.textContent = 'Sign out'; b.onclick = window.confirmSignOut; t.appendChild(b) };
   const ensure = () => ready || (ready = (async () => {
     init(); let u = await first(); if (u && u.isAnonymous) { await auth.signOut(); u = null }
     if (!u) u = await authScreen(STAFF()); topBar(); return u;

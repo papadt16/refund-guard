@@ -2,7 +2,7 @@
 const BANK = process.env.BANK_NAME || 'RefundGuard';
 const N = n => '₦' + Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2 });
 const CAT={
- bank:{label:'Transfer',prov:['OPay','GTBank','Access Bank','Zenith Bank','First Bank','UBA','Kuda','PalmPay'],idl:'Account number',ids:[10],min:1,max:5e6},
+ bank:{label:'Transfer',prov:['RefundGuard','OPay','GTBank','Access Bank','Zenith Bank','First Bank','UBA','Kuda','PalmPay'],idl:'Account number',ids:[10],min:1,max:5e6},
  airtime:{label:'Airtime',prov:['MTN','Airtel','Glo','9mobile'],idl:'Phone number',ids:[11],min:50,max:50000},
  data:{label:'Data',prov:['MTN','Airtel','Glo','9mobile'],idl:'Phone number',ids:[11],plans:[
   ['500MB · 1 day',200,'Daily'],['1GB · 1 day',350,'Daily'],['2GB · 2 days',600,'Daily'],['3.2GB · 2 days',900,'Daily'],
@@ -15,6 +15,7 @@ const CAT={
   ['Padi',4400,'DSTV'],['Yanga',6000,'DSTV'],['Confam',11000,'DSTV'],['Compact',19000,'DSTV'],['Premium',44500,'DSTV'],
   ['Smallie',1900,'GOtv'],['Jinja',3900,'GOtv'],['Jolli',5800,'GOtv'],['Max',8500,'GOtv'],
   ['Nova',1900,'StarTimes'],['Basic',3700,'StarTimes'],['Smart',5100,'StarTimes'],['Classic',5500,'StarTimes'],['Super',9000,'StarTimes']]}};
+const TIERS={1:{per:50000,day:200000},2:{per:200000,day:1000000},3:{per:5000000,day:10000000}};
 const txt=(v,n)=>String(v==null?'':v).replace(/[<>&`\\]/g,'').replace(/'/g,'’').replace(/"/g,'”').trim().slice(0,n||60);
 const chk=(k,p)=>{const c=CAT[k];if(!c)return{err:'Unknown service'};
  const ra=String(p.ra||'').replace(c.alnum?/[^A-Za-z0-9]/g:/\D/g,''),rb=String(p.rb||'');let amt=Math.round(+p.amt*100)/100,plan='',rn;
@@ -28,6 +29,11 @@ const chk=(k,p)=>{const c=CAT[k];if(!c)return{err:'Unknown service'};
  return{kind:k,rn,rb,ra,amt,plan,nar:k==='bank'?txt(p.nar):''}};
 const vProf=b=>{const o={};
  if('nick' in b)o.nick=txt(b.nick,30);
+ if('name' in b){const n=txt(b.name,60);if(n.length<2)return{err:'Enter your full name'};o.name=n}
+ if('email' in b){const e=String(b.email||'').trim().toLowerCase();if(e.length>80||!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e))return{err:'Enter a valid email address'};o.email=e}
+ if('bvn' in b){const v=String(b.bvn||'').replace(/\D/g,'');if(v.length!==11)return{err:'BVN must be 11 digits'};o.bvn=v}
+ if('nin' in b){const v=String(b.nin||'').replace(/\D/g,'');if(v.length!==11)return{err:'NIN must be 11 digits'};o.nin=v}
+ if('photo' in b){const p=String(b.photo||'');if(p&&!(/^data:image\/jpeg;base64,[A-Za-z0-9+\/=]+$/.test(p)&&p.length<70000))return{err:'Choose a smaller image'};o.photo=p}
  if('gender' in b){if(!['','Male','Female','Other'].includes(b.gender))return{err:'Choose a gender'};o.gender=b.gender}
  if('dob' in b){const d=String(b.dob||'');if(d&&!(/^\d{4}-\d{2}-\d{2}$/.test(d)&&new Date(d)<new Date()&&new Date(d)>new Date('1900-01-01')))return{err:'Enter a valid date of birth'};o.dob=d}
  if('phone' in b){const p=String(b.phone||'').replace(/\D/g,'');if(p&&p.length!==11)return{err:'Mobile number must be 11 digits'};o.phone=p}
@@ -45,4 +51,4 @@ const NM={
  refunded:(t,c)=>['Your refund has been approved',`${BANK}: Refund of ${N(t.amt)} approved and credited to your account (case ${c}).`,`Hello, good news: your refund of ${N(t.amt)} for case ${c} has been approved and credited to your account. We are sorry for the inconvenience.`],
  rejected:(t,c)=>['Update on your refund request',`${BANK}: Case ${c} was reviewed and a refund was not approved. Please contact support for details.`,`Hello, after reviewing case ${c} for your ${N(t.amt)} transfer, our accounts team could not approve a refund. If you think this is wrong, please contact customer support and quote the case number.`],
  nodebit:(t,c)=>['No money left your account',`${BANK}: Case ${c} closed. No debit was found for this ${N(t.amt)} transfer, so nothing needs refunding.`,`Hello, we checked case ${c} and found that your account was not debited for this ${N(t.amt)} transfer. Nothing needs to be refunded.`]};
-module.exports = { NM, N, BANK, CAT, chk, W, vProf, vPrefs, vBen };
+module.exports = { NM, N, BANK, CAT, TIERS, chk, W, vProf, vPrefs, vBen };

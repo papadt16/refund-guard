@@ -36,3 +36,18 @@ Customers sign up on the site. Accountants open `/#accountant` and sign in with 
 - The 6 checks are simulated (`TEST_MODE` + `adapters`). Real NIBSS/core-banking calls replace them inside `api/rg.js` runs, keeping the return shapes.
 - No rate limiting, 2FA or email-verification enforcement yet; transfers have a ₦5,000,000 cap.
 - Staff are identified by email list; for many staff use Firebase custom claims instead.
+
+## Two-step verification emails (balance adjustments and account deletion)
+Adjusting a customer's balance or deleting an account sends a 6-digit code to the head accountant's email (default `aigbe208@gmail.com`). Freezing needs no code.
+The server sends the email with SMTP, so add these Vercel environment variables (then redeploy):
+- `SMTP_USER` = the Gmail address that sends the codes (can be the same Gmail)
+- `SMTP_PASS` = a Gmail **App Password** (Google Account > Security > 2-Step Verification > App passwords). Not your normal password.
+- `HEAD_EMAIL` = optional, who receives the codes (defaults to `aigbe208@gmail.com`)
+- `SMTP_HOST` / `SMTP_PORT` / `SMTP_FROM` = optional (default `smtp.gmail.com`, `465`, the SMTP user)
+Codes expire after 10 minutes, work once, are tied to the exact request, and lock after 5 wrong tries. Without SMTP set, those two actions show "Email is not configured".
+
+## Accounts
+- New accounts start with a balance of 0. An accountant funds them with Customers > Adjust balance (code required).
+- Account numbers are unique (reserved atomically in the `accts` collection). Choosing **RefundGuard** as the bank looks the number up and fills in the real name; money sent to another RefundGuard account is credited to them.
+- Tiers (demo limits): Tier 1 up to N50,000 per transaction and N200,000 per day; Tier 2 (phone + BVN) N200,000 / N1,000,000; Tier 3 (NIN + address + profile picture) N5,000,000 / N10,000,000.
+- BVN and NIN are format-checked only (no NIBSS/NIMC call). The server keeps just the last 4 digits and a hash, which stops one ID being linked to two accounts.
