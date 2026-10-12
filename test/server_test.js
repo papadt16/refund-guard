@@ -82,6 +82,17 @@ async function fund(uid, amt) { const r = await t(boss, { action: 'staff', type:
   assert.equal((await t(ada, { action: 'lookup', ra: '2048550203' })).name, 'OSHONE'); assert.equal(store['accts/2048550203'].uid, 'u8', 'registered on first lookup');
   await t(mk('u9', 'a@x.com'), { action: 'prefs', theme: 'dark' }); assert.match(store['users/u9'].acct, /^\d{10}$/); assert.equal(store['accts/' + store['users/u9'].acct].uid, 'u9'); assert.ok(!store['accts/20300834568']);
   await assert.rejects(t(ada, { action: 'staff', type: 'repair' }), /Staff only/); const rr = await t(boss, { action: 'staff', type: 'repair' }); assert.match(rr.message, /Repaired 1/); assert.match(store['users/u7'].acct, /^\d{10}$/);
+  /* more services: catalog validation, prices from the server, plans that belong to the provider */
+  store['users/u20'] = { name: 'New', email: 'n@x.com', acct: '2077777777', bal: 50000, tier: 1 }; const nu = mk('u20', 'n@x.com');
+  let x = await t(nu, { action: 'transfer', kind: 'edu', rb: 'WAEC', ra: 'WAEC12345', plan: 'Result Checker PIN', amt: 1, sim: 'ok' }); assert.equal(store['txs/' + x.txId].amt, 3500);
+  await assert.rejects(t(nu, { action: 'transfer', kind: 'edu', rb: 'NECO', ra: 'NEC12345', plan: 'Result Checker PIN', amt: 1 }), /plan/i);
+  x = await t(nu, { action: 'transfer', kind: 'gift', rb: 'Steam', ra: '08031234567', plan: '₦10,000 card', amt: 1, sim: 'ok' }); assert.equal(store['txs/' + x.txId].amt, 10000);
+  await assert.rejects(t(nu, { action: 'transfer', kind: 'gift', rb: 'Steam', ra: '08031234567', plan: '₦20,000 card', amt: 1 }), /plan/i);
+  x = await t(nu, { action: 'transfer', kind: 'util', rb: 'Lagos Water Corporation', ra: '1234567890', amt: 1000, sim: 'ok' }); assert.equal(store['txs/' + x.txId].rn, 'Lagos Water Corporation Utilities');
+  x = await t(nu, { action: 'transfer', kind: 'ins', rb: 'Leadway', ra: 'POL12345', amt: 2000, sim: 'ghost' }); assert.match(x.message, /debited/); assert.ok(Object.values(store).some(v => v && v.txid === x.txId && v.status === 'awaiting'), 'failed payments of any service open a case');
+  await assert.rejects(t(nu, { action: 'transfer', kind: 'ins', rb: 'Leadway', ra: 'P1', amt: 2000 }), /characters/);
+  x = await t(nu, { action: 'transfer', kind: 'momo', rb: 'OPay Wallet', ra: '08031234567', amt: 500, sim: 'ok' }); assert.equal(store['txs/' + x.txId].kind, 'momo');
+  await assert.rejects(t(nu, { action: 'transfer', kind: 'momo', rb: 'Hack', ra: '08031234567', amt: 500 }), /provider/);
   /* delete needs OTP, frees the account number, removes auth user */
   const d1 = { action: 'staff', type: 'delete', uid: 'u2', reason: 'closed' }, od = await t(boss, { ...d1, type: 'otp', op: 'delete' });
   await assert.rejects(t(boss, { ...d1, otpId: od.otpId, code: '111111' }), /Incorrect/); await t(boss, { ...d1, otpId: od.otpId, code: lastCode() });

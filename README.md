@@ -27,17 +27,13 @@ const r = await DTEngine.investigate(tx, allTxs, DTEngine.defaults(), async (msg
 - `DTEngine.sampleSettlement(txs)` -> a fake settlement CSV for demos (uses the demo-only `tx.sim`).
 The staff screens that use these (Patterns tab, Reconciliation tab) belong to the accountant side.
 
-## Customer app (mobile banking layout)
-Bottom navigation: **Home** (balance with hide/show, service tiles, a banner for payments DT Engine is verifying, recent transactions), **History** (filters by status and by service) and **Me** (profile, beneficiaries, security, dark mode, customer service, demo test mode).
-Each service tile opens its own full page:
-- **To Bank:** account number, bank, recipient name, then amount and narration; Recent and Beneficiaries tabs with search; "Save as beneficiary" on the confirm sheet.
-- **Airtime:** network (auto-detected from the number), your own number pre-filled from your profile, recent numbers, amount tiles or a custom amount.
-- **Data:** Daily, Weekly, Monthly and 3 Months plan groups.
-- **Electricity:** distribution company, prepaid or postpaid, meter number, recent meters, amount tiles.
-- **Betting:** company, user ID, amount tiles. **Cable TV:** provider, smartcard, packages per provider.
-Every payment shows a confirm sheet first. Nothing is pre-filled except the customer's own details (their mobile number). Receipts adapt to the service (provider wording, electricity token) and keep the dispute button.
-Any service can fail while debiting, so all of them feed DT Engine. The demo test mode (Me tab) is demo-only; set `TEST_MODE=off` on the server to disable it.
-Profile, preferences and beneficiaries are saved on the account, so they follow the customer to any device (see `docs/DATA_CONTRACT.md`).
+## Customer app (redesign)
+Bright-red design with four tabs: **Home** (greeting, balance card with hide/show, copy account number, tier badge, Add Money and Transfer, quick services, "Need help with a payment?", recent transactions), **Activity** (search, Successful / Pending / Failed / Refunded pills, Service and month filters, monthly overview, CSV download), **Refund AI** and **Profile** (My Profile, KYC & Tier, Refund Requests, Beneficiaries, Payment Settings with PIN and fingerprint, Security Center, Dark Mode, Messages, Customer Service, Report an Issue, Sign out).
+Pages: Transaction Details (status banner, share receipt, Track Refund or Contact Support), Transfer Money (To Bank / To Another User, recents and beneficiaries), Report an Issue (issue type, reference, amount, date), Refund Tracking (four-step timeline from the DT Engine case), Refund Requests, More Services.
+Services: To Bank, Airtime, Data (Daily / Weekly / Monthly / 3 Months), Electricity, Cable TV, Betting, Utilities, Education, Insurance, Gift Cards, Mobile Money. Any of them can fail while debiting, so all of them feed DT Engine. Nothing is pre-filled except the customer's own details.
+**Refund AI** is a scripted assistant: it explains failed transactions, drafts a report, tracks refund requests and answers FAQs from the customer's own transactions and cases. It is not connected to a language model.
+Buttons use a bright red that dims while a request is being processed.
+The demo status picker for payments is in the confirm sheet and the server (`TEST_MODE=off` disables it).
 
 ## Customer notifications
 Each case stage writes an SMS-style and an email-style message to the `notifications` collection; customers read them in the in-app inbox.

@@ -21,3 +21,5 @@ For non-bank services: `rn` = `<provider> <service>` (e.g. `MTN Airtime`), `rb` 
 
 ## Sync across devices
 Everything a customer sees is stored on their account (Firestore, keyed by their Firebase login), so signing in on another device shows the same balance, transactions, cases, messages, profile, beneficiaries and settings (theme, hide-balance, test mode). Profile, preferences and beneficiaries are written through the server actions `profile`, `prefs` and `ben` (validated by `vProf`, `vPrefs`, `vBen` in the shared catalog code).
+
+Service kinds in `txs.kind`: `bank`, `airtime`, `data`, `power`, `tv`, `bet`, `util`, `edu`, `ins`, `gift`, `momo` (plus `adjust` for staff balance changes). `plan` holds the data plan, TV / exam / gift-card package or meter type; plans for TV, education and gift cards belong to the chosen provider and the server sets their price.

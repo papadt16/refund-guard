@@ -3,25 +3,30 @@ const BANK = process.env.BANK_NAME || 'RefundGuard';
 const N = n => '₦' + Number(n).toLocaleString('en-NG', { minimumFractionDigits: 2 });
 const CAT={
  bank:{label:'Transfer',prov:['RefundGuard','OPay','GTBank','Access Bank','Zenith Bank','First Bank','UBA','Kuda','PalmPay'],idl:'Account number',ids:[10],min:1,max:5e6},
- airtime:{label:'Airtime',prov:['MTN','Airtel','Glo','9mobile'],idl:'Phone number',ids:[11],min:50,max:50000},
- data:{label:'Data',prov:['MTN','Airtel','Glo','9mobile'],idl:'Phone number',ids:[11],plans:[
+ airtime:{label:'Airtime',pl:'Network',prov:['MTN','Airtel','Glo','9mobile'],idl:'Phone number',ids:[11],min:50,max:50000},
+ data:{label:'Data',pl:'Network',prov:['MTN','Airtel','Glo','9mobile'],idl:'Phone number',ids:[11],plans:[
   ['500MB · 1 day',200,'Daily'],['1GB · 1 day',350,'Daily'],['2GB · 2 days',600,'Daily'],['3.2GB · 2 days',900,'Daily'],
   ['1.5GB · 7 days',600,'Weekly'],['3.5GB · 7 days',1500,'Weekly'],['6GB · 7 days',2500,'Weekly'],['11GB · 7 days',3500,'Weekly'],
   ['3GB · 30 days',1600,'Monthly'],['10GB · 30 days',4500,'Monthly'],['25GB · 30 days',9000,'Monthly'],['75GB · 30 days',18000,'Monthly'],
   ['35GB · 90 days',10000,'3 Months'],['100GB · 90 days',25000,'3 Months'],['200GB · 90 days',45000,'3 Months']]},
- power:{label:'Electricity',prov:['IKEDC','EKEDC','AEDC','PHED'],idl:'Meter number',ids:[11,13],min:500,max:500000},
- bet:{label:'Betting',prov:['Bet9ja','SportyBet','1xBet','NairaBet'],idl:'User ID',rng:[4,20],alnum:1,min:100,max:500000},
- tv:{label:'Cable TV',prov:['DSTV','GOtv','StarTimes'],idl:'Smartcard number',ids:[10],plans:[
+ power:{label:'Electricity',pl:'Distribution company',prov:['IKEDC','EKEDC','AEDC','PHED'],idl:'Meter number',ids:[11,13],min:500,max:500000},
+ bet:{label:'Betting',pl:'Betting company',prov:['Bet9ja','SportyBet','1xBet','NairaBet'],idl:'User ID',rng:[4,20],alnum:1,min:100,max:500000},
+ tv:{label:'Cable TV',pl:'Provider',prov:['DSTV','GOtv','StarTimes'],idl:'Smartcard number',ids:[10],plans:[
   ['Padi',4400,'DSTV'],['Yanga',6000,'DSTV'],['Confam',11000,'DSTV'],['Compact',19000,'DSTV'],['Premium',44500,'DSTV'],
   ['Smallie',1900,'GOtv'],['Jinja',3900,'GOtv'],['Jolli',5800,'GOtv'],['Max',8500,'GOtv'],
-  ['Nova',1900,'StarTimes'],['Basic',3700,'StarTimes'],['Smart',5100,'StarTimes'],['Classic',5500,'StarTimes'],['Super',9000,'StarTimes']]}};
+  ['Nova',1900,'StarTimes'],['Basic',3700,'StarTimes'],['Smart',5100,'StarTimes'],['Classic',5500,'StarTimes'],['Super',9000,'StarTimes']]},
+ util:{label:'Utilities',pl:'Provider',prov:['Lagos Water Corporation','Abuja Water Board','Kano Water Board'],idl:'Account number',ids:[10],min:500,max:500000},
+ edu:{label:'Education',pl:'Exam body',prov:['WAEC','NECO','JAMB'],idl:'Candidate or profile ID',rng:[5,20],alnum:1,plans:[['Result Checker PIN',3500,'WAEC'],['Result Token',1500,'NECO'],['UTME PIN',4700,'JAMB'],['Result Slip',1500,'JAMB']]},
+ ins:{label:'Insurance',pl:'Insurer',prov:['AXA Mansard','Leadway','AIICO'],idl:'Policy number',rng:[5,20],alnum:1,min:1000,max:2000000},
+ gift:{label:'Gift Cards',pl:'Card',prov:['iTunes','Google Play','Steam'],idl:'Phone number for delivery',ids:[11],plans:[['₦5,000 card',5000,'iTunes'],['₦10,000 card',10000,'iTunes'],['₦20,000 card',20000,'iTunes'],['₦5,000 card',5000,'Google Play'],['₦10,000 card',10000,'Google Play'],['₦20,000 card',20000,'Google Play'],['₦5,000 card',5000,'Steam'],['₦10,000 card',10000,'Steam']]},
+ momo:{label:'Mobile Money',pl:'Wallet',prov:['OPay Wallet','PalmPay Wallet','Moniepoint Wallet'],idl:'Phone number',ids:[11],min:100,max:500000}};
 const TIERS={1:{per:50000,day:200000},2:{per:200000,day:1000000},3:{per:5000000,day:10000000}};
 const txt=(v,n)=>String(v==null?'':v).replace(/[<>&`\\]/g,'').replace(/'/g,'’').replace(/"/g,'”').trim().slice(0,n||60);
 const chk=(k,p)=>{const c=CAT[k];if(!c)return{err:'Unknown service'};
  const ra=String(p.ra||'').replace(c.alnum?/[^A-Za-z0-9]/g:/\D/g,''),rb=String(p.rb||'');let amt=Math.round(+p.amt*100)/100,plan='',rn;
  if(!c.prov.includes(rb))return{err:k==='bank'?'Choose a bank':'Choose a provider'};
  if(k==='bank'){rn=txt(p.rn).toUpperCase();if(!rn)return{err:'Enter the recipient name'}}else rn=rb+' '+c.label;
- if(c.plans){const pl=c.plans.find(x=>x[0]===p.plan&&(k!=='tv'||x[2]===rb));if(!pl)return{err:'Choose a plan'};plan=pl[0];amt=pl[1]}
+ if(c.plans){const pl=c.plans.find(x=>x[0]===p.plan&&(k==='data'||x[2]===rb));if(!pl)return{err:'Choose a plan'};plan=pl[0];amt=pl[1]}
  if(k==='power')plan=p.mt==='Postpaid'?'Postpaid':'Prepaid';
  const okLen=c.rng?ra.length>=c.rng[0]&&ra.length<=c.rng[1]:c.ids.includes(ra.length);
  if(!okLen)return{err:c.idl+(c.rng?' must be '+c.rng[0]+' to '+c.rng[1]+' characters':' must be '+c.ids.join(' or ')+' digits')};
