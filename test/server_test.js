@@ -82,6 +82,14 @@ async function fund(uid, amt) { const r = await t(boss, { action: 'staff', type:
   assert.equal((await t(ada, { action: 'lookup', ra: '2048550203' })).name, 'OSHONE'); assert.equal(store['accts/2048550203'].uid, 'u8', 'registered on first lookup');
   await t(mk('u9', 'a@x.com'), { action: 'prefs', theme: 'dark' }); assert.match(store['users/u9'].acct, /^\d{10}$/); assert.equal(store['accts/' + store['users/u9'].acct].uid, 'u9'); assert.ok(!store['accts/20300834568']);
   await assert.rejects(t(ada, { action: 'staff', type: 'repair' }), /Staff only/); const rr = await t(boss, { action: 'staff', type: 'repair' }); assert.match(rr.message, /Repaired 1/); assert.match(store['users/u7'].acct, /^\d{10}$/);
+  /* DT Engine safeguards */
+  const E = require('../engine/dt_engine.js'), tx0 = { id: 'x', uid: 'u', rb: 'OPay', amt: 5, ref: 'r', sess: 's', ts: 1, ra: '1', debited: true, sim: 'ok' };
+  let r2_ = await E.investigate(tx0, [], E.defaults(), () => {}, 0, { ...E.adapters, nip: () => ({ v: 1 }), beneficiary: () => ({ v: .5 }) }); assert.equal(r2_.verdict, 'review', 'no auto-correct on half the evidence');
+  r2_ = await E.investigate({ ...tx0, sim: 'ghost', status: 'refunded' }, [], E.defaults(), () => {}, 0); assert.notEqual(r2_.verdict, 'refund', 'an already-refunded transfer is not refunded twice');
+  await assert.rejects(t(boss, { action: 'staff', type: 'train' }), /at least 10/);
+  for (let i = 0; i < 12; i++) store['examples/e' + i] = { f: { core: 1, tsq: 0, ben: 0, rev: 0, dup: 0 }, y: 1, ts: i }; const tr = await t(boss, { action: 'staff', type: 'train' }); assert.match(tr.message, /retrained on 13/); assert.ok(store['engine/config'].prev);
+  const bad_ = []; for (let i = 0; i < 40; i++) bad_.push({ f: { core: 1, tsq: 1, ben: 1, rev: 0, dup: 0 }, y: 1 }); assert.equal(E.train(bad_, E.defaults()).guard.ok, false, 'biased retraining is rejected');
+  const v1 = store['engine/config'].version; await t(boss, { action: 'staff', type: 'rollback' }); assert.equal(store['engine/config'].version, v1 + 1);
   /* delete needs OTP, frees the account number, removes auth user */
   const d1 = { action: 'staff', type: 'delete', uid: 'u2', reason: 'closed' }, od = await t(boss, { ...d1, type: 'otp', op: 'delete' });
   await assert.rejects(t(boss, { ...d1, otpId: od.otpId, code: '111111' }), /Incorrect/); await t(boss, { ...d1, otpId: od.otpId, code: lastCode() });

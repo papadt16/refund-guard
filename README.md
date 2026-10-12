@@ -45,7 +45,6 @@ These are in-app only. A real deployment would send them through an SMS gateway 
 
 ## Staff portal tabs
 Dashboard, Cases, Transactions, Customers, Patterns, Reconciliation, DT Engine, Audit. The portal only opens for people with edit access to the artifact (a screen check only; the db still lets Contributors write).
-`accountant_side.js` is the staff section on its own, as a drop-in for another copy of `app.html` (instructions in its header).
 
 ## Split of work
 - Chat 1 (customer side + engine): customer app, receipts, disputes, notifications, DT Engine.

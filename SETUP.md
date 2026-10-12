@@ -57,3 +57,9 @@ Codes expire after 10 minutes, work once, are tied to the exact request, and loc
 - **Fingerprint** uses WebAuthn (the phone's fingerprint, face or screen lock). It needs HTTPS (Vercel is fine) and is registered per domain, so add it again if the domain changes. The server verifies the signature and ties each approval to that exact payment, so it cannot be replayed. Adding or removing it needs the PIN. Only devices that support it show the option.
 - **Login password** (Profile > Login Password): re-checks the current password, then sets the new one. The "forgot it?" link emails a reset.
 - Optional env var `WEBAUTHN_ORIGIN` (for example `https://refundguard.vercel.app`) pins the expected site address if you use a custom domain behind a proxy.
+
+## DT Engine safeguards
+- The engine corrects a status to Successful by itself only when BOTH the switch (NIP) and the beneficiary confirm delivery. Any missing or pending evidence goes to an accountant.
+- The core switch status is part of the score, and the reversal check now sees transfers that were already refunded.
+- Retraining needs at least 10 accountant decisions, is checked on held-out decisions, and is refused if it would push a fully confirmed delivery towards the refund line. "Roll back last training" restores the previous settings.
+- All text read from the database is HTML-escaped before it is shown, and engine settings are readable by staff only. Publish the new `firestore.rules` for that to take effect.
