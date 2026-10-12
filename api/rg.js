@@ -58,7 +58,7 @@ async function healAcct(uid) {
   throw bad('Could not repair the account number', 500);
 }
 const aud = m => db.collection('audit').add({ t: Date.now(), m }).catch(() => {});
-const getCfg = async () => { const s = await db.doc('engine/config').get(); return { ...E.defaults(), ...(s.exists ? s.data() : {}) } };
+const getCfg = async () => { const s = await db.doc('engine/config').get(); return E.norm(s.exists ? s.data() : {}) };
 async function notify(to, t, cid, type) { try { const m = NM[type](t, cid.slice(0, 7)), id = 'N' + rid(); await db.doc('notifications/' + id).set({ id, uid: to, caseId: cid, txid: t.id || '', type, subject: m[0], sms: m[1], body: m[2], ts: Date.now(), read: false }) } catch (e) {} }
 
 async function runCase(t, type, note) {
@@ -234,7 +234,13 @@ async function handle(ctx, b) {
       if (b.type === 'freeze') { await db.doc('users/' + String(b.uid)).update({ frozen: !!b.frozen }); await aud((b.frozen ? 'Froze ' : 'Unfroze ') + b.uid); return {} }
       if (b.type === 'reset') { await db.doc('engine/config').set(E.defaults()); await aud('DT Engine reset to defaults'); return { message: 'Reset to defaults' } }
       if (b.type === 'cfg') { const hi = +b.hi, lo = +b.lo, sl = Math.round(+b.sl); if (!(lo > 0 && lo < hi && hi < 1) || !(sl >= 1)) throw bad('Need 0 < low < high < 1 and an SLA of at least 1 minute'); await db.doc('engine/config').set({ ...C, hi, lo, slaMin: sl }); await aud('DT Engine settings: high ' + hi + ', low ' + lo + ', SLA ' + sl + 'm'); return { message: 'Engine settings saved' } }
-      if (b.type === 'train') { const ex = (await db.collection('examples').get()).docs.map(d => d.data()); if (!ex.length) throw bad('No decisions to learn from yet'); const c = E.train(ex.map(e => ({ f: e.f, y: e.y })), C); await db.doc('engine/config').set(c); await aud('DT Engine retrained on ' + c.trainedOn + ' examples'); return { message: 'DT Engine retrained on ' + c.trainedOn + ' examples (v' + c.version + ')' } }
+      if (b.type === 'train') {
+        const ex = (await db.collection('examples').get()).docs.map(d => d.data()); if (!ex.length) throw bad('No decisions to learn from yet');
+        const c = E.train(ex.map(e => ({ f: e.f, y: e.y })), C); if (!c.guard.ok) { await aud('DT Engine retrain rejected: ' + c.guard.reasons.join('; ')); throw bad('Retrain rejected: ' + c.guard.reasons.join('; ')) }
+        const { prev, guard, before, metrics, ...old } = C; await db.doc('engine/config').set({ ...c, prev: old }); await aud('DT Engine retrained on ' + c.trainedOn + ' decisions (v' + c.version + ')');
+        return { message: 'DT Engine retrained on ' + c.trainedOn + ' decisions (v' + c.version + '). A fully confirmed delivery still scores ' + c.guard.confirmed.toFixed(2) + '.' };
+      }
+      if (b.type === 'rollback') { if (!C.prev) throw bad('Nothing to roll back to'); await db.doc('engine/config').set({ ...E.norm(C.prev), version: C.version + 1 }); await aud('DT Engine rolled back'); return { message: 'Rolled back to the previous settings' } }
       if (b.type === 'recon') {
         const ts = await db.doc('txs/' + String(b.txid)).get(); if (!ts.exists) throw bad('Transaction not found', 404); const t = ts.data();
         if (b.action === 'correct_to_success') { if (t.status !== 'failed') throw bad('Only failed transactions can be corrected'); await db.doc('txs/' + t.id).update({ status: 'success' }); await aud('Reconciliation: ' + t.ref + ' corrected to Successful'); return { message: 'Status corrected to Successful' } }

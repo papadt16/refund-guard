@@ -3,8 +3,9 @@
    p = probability a refund is DUE. verdict: p>=hi 'refund' | p<=lo 'auto_success' | else 'review'. Humans always decide refunds.
    Train: DTEngine.train(examples,cfg) where examples=[{f:{tsq,ben,rev,dup},y:0|1}]. */
 const DTEngine=(()=>{
-const FEATS=['tsq','ben','rev','dup'],sig=x=>1/(1+Math.exp(-x)),fmt=v=>v===1?'CONFIRMED':v===.5?'PENDING/NO RESPONSE':'NONE';
-const defaults=()=>({version:1,bias:2.5,w:{tsq:-3,ben:-3.5,rev:-2,dup:.5},hi:.8,lo:.1,slaMin:30,trainedOn:0});
+const FEATS=['core','tsq','ben','rev','dup'],sig=x=>1/(1+Math.exp(-x)),fmt=v=>v===1?'CONFIRMED':v===.5?'PENDING/NO RESPONSE':'NONE';
+const defaults=()=>({version:1,bias:2,w:{core:.5,tsq:-3,ben:-3.5,rev:-2,dup:.5},hi:.8,lo:.1,slaMin:30,trainedOn:0});
+const norm=c=>({...defaults(),...c,w:{...defaults().w,...((c||{}).w||{})}});
 /* ADAPTERS = the ONLY place the engine touches the outside world. Each may be sync or async (return a value or a Promise).
    Real integration map (shape returned -> what to call):
    ledger(tx)      -> {debited:boolean}               core-banking ledger lookup by tx.ref
@@ -19,10 +20,10 @@ const adapters={
  core:tx=>({status:tx.sim==='ok'?'SUCCESS':'FAILED'}),
  nip:tx=>({v:{ok:1,mismatch:1,ghost:0,clean:0,unclear:.5}[tx.sim]??0}),
  beneficiary:tx=>({v:{ok:1,mismatch:1,ghost:0,clean:0,unclear:.5}[tx.sim]??0}),
- reversal:tx=>({v:0}),
+ reversal:tx=>({v:(tx.reversed||tx.status==='refunded')?1:0}),
  dup:(tx,all)=>({v:all.filter(x=>x.id!==tx.id&&x.uid===tx.uid&&x.ra===tx.ra&&x.amt===tx.amt&&Math.abs(x.ts-tx.ts)<36e5).length?1:0})};
-const score=(f,c)=>sig(c.bias+FEATS.reduce((s,k)=>s+c.w[k]*(f[k]||0),0));
-const explain=(f,c)=>[...FEATS.map(k=>({k,v:(f||{})[k]||0,w:c.w[k],c:c.w[k]*((f||{})[k]||0)})),{k:'bias',v:1,w:c.bias,c:c.bias}];
+const score=(f,c)=>sig(c.bias+FEATS.reduce((s,k)=>s+(c.w[k]||0)*(f[k]||0),0));
+const explain=(f,c)=>[...FEATS.map(k=>({k,v:(f||{})[k]||0,w:c.w[k]||0,c:(c.w[k]||0)*((f||{})[k]||0)})),{k:'bias',v:1,w:c.bias,c:c.bias}];
 const conf=p=>Math.max(p,1-p);
 const sla=(cs,now=Date.now())=>cs.status!=='awaiting'||!cs.slaDue?{state:'none'}:now>cs.slaDue?{state:'overdue',mins:Math.ceil((now-cs.slaDue)/6e4)}:{state:'ok',mins:Math.ceil((cs.slaDue-now)/6e4)};
 const evaluate=(ex,c)=>{if(!ex.length)return null;let ok=0,L=0;for(const x of ex){const p=Math.min(1-1e-6,Math.max(1e-6,score(x.f||{},c)));if((p>=.5)===(x.y===1))ok++;L-=x.y===1?Math.log(p):Math.log(1-p)}return{n:ex.length,acc:ok/ex.length,loss:L/ex.length}};
@@ -71,14 +72,28 @@ async function investigate(tx,all,cfg,log,delay=550,ad=adapters){
  await L((tx.kind&&tx.kind!=='bank'?'CHECK 4 Service provider ('+tx.rb+') delivery: ':'CHECK 4 Beneficiary bank ('+tx.rb+') credit: ')+fmt(ben.v),ben.v===1?'k':'w');
  await L('CHECK 5 Reversal sweep: '+(rev.v?'reversal found':'no reversal entry within SLA window'),rev.v?'k':'e');
  await L('CHECK 6 Duplicate/fraud screen: '+(dup.v?'similar transfer in last hour':'clear'),dup.v?'w':'k');
- const f={tsq:nip.v,ben:ben.v,rev:rev.v,dup:dup.v},p=score(f,cfg);
- const verdict=p>=cfg.hi?'refund':p<=cfg.lo?'auto_success':'review';
- await L('SCORE p(refund due)='+p.toFixed(3)+' (hi '+cfg.hi+', lo '+cfg.lo+') -> '+verdict.toUpperCase(),verdict==='refund'?'e':verdict==='review'?'w':'k');
+ const f={core:core.status==='FAILED'?1:0,tsq:nip.v,ben:ben.v,rev:rev.v,dup:dup.v},p=score(f,norm(cfg));
+ let verdict=p>=cfg.hi?'refund':p<=cfg.lo?'auto_success':'review',held='';
+ /* the engine may only decide on its own when BOTH the switch (NIP) and the beneficiary confirm delivery; anything less goes to a human */
+ if(verdict==='auto_success'&&!(nip.v===1&&ben.v===1)){verdict='review';held=' (held for review: auto-correct needs both NIP and the beneficiary to confirm)'}
+ await L('SCORE p(refund due)='+p.toFixed(3)+' (hi '+cfg.hi+', lo '+cfg.lo+') -> '+verdict.toUpperCase()+held,verdict==='refund'?'e':verdict==='review'?'w':'k');
  return{f,p,verdict}}
-function train(ex,cfg,epochs=300,lr=.3){const c=JSON.parse(JSON.stringify(cfg));if(!ex.length)return c;
- const P=defaults(),lam=.02;/* L2 pull towards the defaults so a few decisions cannot send weights to extremes */
- for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}
- c.before=evaluate(ex,cfg);c.metrics=evaluate(ex,c);c.version++;c.trainedOn=ex.length;return c}
-return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,patterns,parseSettlement,reconcile,sampleSettlement,investigate,train}})();
+/* Retraining is guarded: it needs enough decisions, learns alongside fixed anchor cases, is checked on held-out decisions, and is rejected if it would
+   move a fully confirmed delivery towards the refund line (staff only see escalated cases, so their decisions are a biased sample). */
+const ANCHORS=[{f:{core:1,tsq:1,ben:1,rev:0,dup:0},y:0},{f:{core:1,tsq:0,ben:0,rev:0,dup:0},y:1}];
+function fit(ex,cfg,epochs,lr){const c=norm(JSON.parse(JSON.stringify(cfg))),P=defaults(),lam=.02;
+ for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}return c}
+function train(ex,cfg,epochs=300,lr=.3){const base=norm(cfg),MIN=10,reasons=[];
+ if(ex.length<MIN)return{...base,guard:{ok:false,reasons:['need at least '+MIN+' accountant decisions, have '+ex.length]}};
+ const hold=ex.filter((_,i)=>i%5===0),tr=ex.filter((_,i)=>i%5!==0),anc=[].concat(ANCHORS,ANCHORS,ANCHORS);
+ const val=fit([...tr,...anc],base,epochs,lr),hb=evaluate(hold,base),ha=evaluate(hold,val);
+ if(hb&&ha&&ha.acc<hb.acc-.05)reasons.push('accuracy on held-out decisions fell from '+Math.round(hb.acc*100)+'% to '+Math.round(ha.acc*100)+'%');
+ const c=fit([...ex,...anc],base,epochs,lr),conf=score(ANCHORS[0].f,c),none=score(ANCHORS[1].f,c);
+ if(conf>.25)reasons.push('a fully confirmed delivery would score '+conf.toFixed(2)+' (limit 0.25)');
+ if(none<c.hi)reasons.push('a transfer with nothing delivered would score '+none.toFixed(2)+', below the refund line');
+ const g={ok:!reasons.length,reasons,confirmed:conf,none,holdout:{before:hb,after:ha}};
+ if(reasons.length)return{...base,guard:g};
+ c.before=evaluate(ex,base);c.metrics=evaluate(ex,c);c.version=base.version+1;c.trainedOn=ex.length;c.guard=g;return c}
+return{FEATS,defaults,norm,ANCHORS,adapters,score,explain,conf,sla,evaluate,patterns,parseSettlement,reconcile,sampleSettlement,investigate,train}})();
 
 if (typeof module !== "undefined") module.exports = DTEngine;

@@ -92,8 +92,9 @@ button.p:active{opacity:.6;transform:scale(.985)}button.p:disabled,button.p.busy
    p = probability a refund is DUE. verdict: p>=hi 'refund' | p<=lo 'auto_success' | else 'review'. Humans always decide refunds.
    Train: DTEngine.train(examples,cfg) where examples=[{f:{tsq,ben,rev,dup},y:0|1}]. */
 const DTEngine=(()=>{
-const FEATS=['tsq','ben','rev','dup'],sig=x=>1/(1+Math.exp(-x)),fmt=v=>v===1?'CONFIRMED':v===.5?'PENDING/NO RESPONSE':'NONE';
-const defaults=()=>({version:1,bias:2.5,w:{tsq:-3,ben:-3.5,rev:-2,dup:.5},hi:.8,lo:.1,slaMin:30,trainedOn:0});
+const FEATS=['core','tsq','ben','rev','dup'],sig=x=>1/(1+Math.exp(-x)),fmt=v=>v===1?'CONFIRMED':v===.5?'PENDING/NO RESPONSE':'NONE';
+const defaults=()=>({version:1,bias:2,w:{core:.5,tsq:-3,ben:-3.5,rev:-2,dup:.5},hi:.8,lo:.1,slaMin:30,trainedOn:0});
+const norm=c=>({...defaults(),...c,w:{...defaults().w,...((c||{}).w||{})}});
 /* ADAPTERS = the ONLY place the engine touches the outside world. Each may be sync or async (return a value or a Promise).
    Real integration map (shape returned -> what to call):
    ledger(tx)      -> {debited:boolean}               core-banking ledger lookup by tx.ref
@@ -108,10 +109,10 @@ const adapters={
  core:tx=>({status:tx.sim==='ok'?'SUCCESS':'FAILED'}),
  nip:tx=>({v:{ok:1,mismatch:1,ghost:0,clean:0,unclear:.5}[tx.sim]??0}),
  beneficiary:tx=>({v:{ok:1,mismatch:1,ghost:0,clean:0,unclear:.5}[tx.sim]??0}),
- reversal:tx=>({v:0}),
+ reversal:tx=>({v:(tx.reversed||tx.status==='refunded')?1:0}),
  dup:(tx,all)=>({v:all.filter(x=>x.id!==tx.id&&x.uid===tx.uid&&x.ra===tx.ra&&x.amt===tx.amt&&Math.abs(x.ts-tx.ts)<36e5).length?1:0})};
-const score=(f,c)=>sig(c.bias+FEATS.reduce((s,k)=>s+c.w[k]*(f[k]||0),0));
-const explain=(f,c)=>[...FEATS.map(k=>({k,v:(f||{})[k]||0,w:c.w[k],c:c.w[k]*((f||{})[k]||0)})),{k:'bias',v:1,w:c.bias,c:c.bias}];
+const score=(f,c)=>sig(c.bias+FEATS.reduce((s,k)=>s+(c.w[k]||0)*(f[k]||0),0));
+const explain=(f,c)=>[...FEATS.map(k=>({k,v:(f||{})[k]||0,w:c.w[k]||0,c:(c.w[k]||0)*((f||{})[k]||0)})),{k:'bias',v:1,w:c.bias,c:c.bias}];
 const conf=p=>Math.max(p,1-p);
 const sla=(cs,now=Date.now())=>cs.status!=='awaiting'||!cs.slaDue?{state:'none'}:now>cs.slaDue?{state:'overdue',mins:Math.ceil((now-cs.slaDue)/6e4)}:{state:'ok',mins:Math.ceil((cs.slaDue-now)/6e4)};
 const evaluate=(ex,c)=>{if(!ex.length)return null;let ok=0,L=0;for(const x of ex){const p=Math.min(1-1e-6,Math.max(1e-6,score(x.f||{},c)));if((p>=.5)===(x.y===1))ok++;L-=x.y===1?Math.log(p):Math.log(1-p)}return{n:ex.length,acc:ok/ex.length,loss:L/ex.length}};
@@ -160,15 +161,29 @@ async function investigate(tx,all,cfg,log,delay=550,ad=adapters){
  await L((tx.kind&&tx.kind!=='bank'?'CHECK 4 Service provider ('+tx.rb+') delivery: ':'CHECK 4 Beneficiary bank ('+tx.rb+') credit: ')+fmt(ben.v),ben.v===1?'k':'w');
  await L('CHECK 5 Reversal sweep: '+(rev.v?'reversal found':'no reversal entry within SLA window'),rev.v?'k':'e');
  await L('CHECK 6 Duplicate/fraud screen: '+(dup.v?'similar transfer in last hour':'clear'),dup.v?'w':'k');
- const f={tsq:nip.v,ben:ben.v,rev:rev.v,dup:dup.v},p=score(f,cfg);
- const verdict=p>=cfg.hi?'refund':p<=cfg.lo?'auto_success':'review';
- await L('SCORE p(refund due)='+p.toFixed(3)+' (hi '+cfg.hi+', lo '+cfg.lo+') -> '+verdict.toUpperCase(),verdict==='refund'?'e':verdict==='review'?'w':'k');
+ const f={core:core.status==='FAILED'?1:0,tsq:nip.v,ben:ben.v,rev:rev.v,dup:dup.v},p=score(f,norm(cfg));
+ let verdict=p>=cfg.hi?'refund':p<=cfg.lo?'auto_success':'review',held='';
+ /* the engine may only decide on its own when BOTH the switch (NIP) and the beneficiary confirm delivery; anything less goes to a human */
+ if(verdict==='auto_success'&&!(nip.v===1&&ben.v===1)){verdict='review';held=' (held for review: auto-correct needs both NIP and the beneficiary to confirm)'}
+ await L('SCORE p(refund due)='+p.toFixed(3)+' (hi '+cfg.hi+', lo '+cfg.lo+') -> '+verdict.toUpperCase()+held,verdict==='refund'?'e':verdict==='review'?'w':'k');
  return{f,p,verdict}}
-function train(ex,cfg,epochs=300,lr=.3){const c=JSON.parse(JSON.stringify(cfg));if(!ex.length)return c;
- const P=defaults(),lam=.02;/* L2 pull towards the defaults so a few decisions cannot send weights to extremes */
- for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}
- c.before=evaluate(ex,cfg);c.metrics=evaluate(ex,c);c.version++;c.trainedOn=ex.length;return c}
-return{FEATS,defaults,adapters,score,explain,conf,sla,evaluate,patterns,parseSettlement,reconcile,sampleSettlement,investigate,train}})();
+/* Retraining is guarded: it needs enough decisions, learns alongside fixed anchor cases, is checked on held-out decisions, and is rejected if it would
+   move a fully confirmed delivery towards the refund line (staff only see escalated cases, so their decisions are a biased sample). */
+const ANCHORS=[{f:{core:1,tsq:1,ben:1,rev:0,dup:0},y:0},{f:{core:1,tsq:0,ben:0,rev:0,dup:0},y:1}];
+function fit(ex,cfg,epochs,lr){const c=norm(JSON.parse(JSON.stringify(cfg))),P=defaults(),lam=.02;
+ for(let e=0;e<epochs;e++)for(const x of ex){const err=x.y-score(x.f,c);c.bias+=lr*(err-lam*(c.bias-P.bias));FEATS.forEach(k=>c.w[k]+=lr*(err*(x.f[k]||0)-lam*(c.w[k]-P.w[k])))}return c}
+function train(ex,cfg,epochs=300,lr=.3){const base=norm(cfg),MIN=10,reasons=[];
+ if(ex.length<MIN)return{...base,guard:{ok:false,reasons:['need at least '+MIN+' accountant decisions, have '+ex.length]}};
+ const hold=ex.filter((_,i)=>i%5===0),tr=ex.filter((_,i)=>i%5!==0),anc=[].concat(ANCHORS,ANCHORS,ANCHORS);
+ const val=fit([...tr,...anc],base,epochs,lr),hb=evaluate(hold,base),ha=evaluate(hold,val);
+ if(hb&&ha&&ha.acc<hb.acc-.05)reasons.push('accuracy on held-out decisions fell from '+Math.round(hb.acc*100)+'% to '+Math.round(ha.acc*100)+'%');
+ const c=fit([...ex,...anc],base,epochs,lr),conf=score(ANCHORS[0].f,c),none=score(ANCHORS[1].f,c);
+ if(conf>.25)reasons.push('a fully confirmed delivery would score '+conf.toFixed(2)+' (limit 0.25)');
+ if(none<c.hi)reasons.push('a transfer with nothing delivered would score '+none.toFixed(2)+', below the refund line');
+ const g={ok:!reasons.length,reasons,confirmed:conf,none,holdout:{before:hb,after:ha}};
+ if(reasons.length)return{...base,guard:g};
+ c.before=evaluate(ex,base);c.metrics=evaluate(ex,c);c.version=base.version+1;c.trainedOn=ex.length;c.guard=g;return c}
+return{FEATS,defaults,norm,ANCHORS,adapters,score,explain,conf,sla,evaluate,patterns,parseSettlement,reconcile,sampleSettlement,investigate,train}})();
 </script>
 
 <script>
@@ -182,8 +197,8 @@ const put=(c,id,d)=>db.collection(c).doc(id).set(d),upd=(c,id,d)=>db.collection(
 const aud=m=>window.API_MODE?0:put('audit',rid(),{t:Date.now(),m}).catch(()=>{});
 const sc=t=>{const c=S.cases.find(x=>x.id===t.caseId);return t.status==='failed'&&t.debited&&c&&(c.status==='awaiting'||c.status==='investigating')?'<span class="tag s-awaiting">Failed · under review</span>':st(t.status)};
 const hold=e=>{if(e&&e.code==='revoked')toast('Access to the shared data was withdrawn.')};
-const watch=(n,q)=>(q||db.collection(n)).onSnapshot(s=>{S[n]=s.docs.map(d=>({id:d.id,...d.data()}));if(n==='txs'&&STAFF)S[n]=S[n].filter(t=>!t.mirror);if(!s.metadata.fromCache)LD[n]=1;R()},hold);
-const watchMe=()=>db.doc('users/'+uid).onSnapshot(s=>{S.users=s.exists?[{id:uid,...s.data()}]:[];if(!s.metadata.fromCache)LD.users=1;R()},hold);
+const watch=(n,q)=>(q||db.collection(n)).onSnapshot(s=>{S[n]=s.docs.map(d=>escD({id:d.id,...d.data()}));if(n==='txs'&&STAFF)S[n]=S[n].filter(t=>!t.mirror);if(!s.metadata.fromCache)LD[n]=1;R()},hold);
+const watchMe=()=>db.doc('users/'+uid).onSnapshot(s=>{S.users=s.exists?[escD({id:uid,...s.data()})]:[];if(!s.metadata.fromCache)LD.users=1;R()},hold);
 async function boot(){
  $('#lg').innerHTML=BANK+' <small style="color:var(--mu);font-weight:500">· '+(STAFF?'Staff portal':'AI refund resolution demo')+'</small>';
  const cl=window.claude&&await claude.use('db');user=window.claude&&await claude.use('user');
@@ -193,7 +208,7 @@ async function boot(){
  if(STAFF&&!(await user.canEdit())){$('#app').innerHTML='<div class="card">The staff portal is only available to people with edit access to this artifact. Ask the owner to give you the Editor role.</div>';return}
  if(STAFF)['users','txs','cases','examples','audit'].forEach(n=>watch(n));
  else{canW=await user.can('data.write');watchMe();watch('txs',db.collection('txs').where('uid','==',uid));watch('cases',db.collection('cases').where('uid','==',uid));watchN()}
- db.collection('engine').doc('config').onSnapshot(s=>{if(s.exists)CFG={...DTEngine.defaults(),...s.data()};R()});
+ if(STAFF||!SRV())db.collection('engine').doc('config').onSnapshot(s=>{if(s.exists)CFG=DTEngine.norm(s.data());R()});
  addEventListener('hashchange',()=>location.reload())}
 const FQ='#app input,#app select,#mod input,#mod select';
 const snapF=()=>{const o={},a=document.activeElement;document.querySelectorAll(FQ).forEach(e=>{const k=e.name||e.id;if(k)o[k]=e.value});return{o,k:a&&(a.name||a.id),p:a&&a.selectionStart}};
@@ -204,6 +219,9 @@ function closeM(){cur=tx=ib=cf=ed=AU=null;$('#mod').innerHTML=''}
 /* ================= SERVER MODE (standalone build) =================
    When window.API_MODE is set by platform.js, every mutation goes through the server (/api/rg) instead of writing to the db from the browser. */
 const SRV=()=>!!window.API_MODE;
+/* defence in depth: every string that comes back from the database is HTML-escaped once, here, before any view uses it */
+const SAFEK=new Set(['photo','id','uid','txid','status','kind','rb','ra','plan','acct','ref','sess','type','verdict']); /* server-validated or server-generated, never free text */
+const escD=o=>typeof o==='string'?o.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]):Array.isArray(o)?o.map(escD):o&&typeof o==='object'?Object.fromEntries(Object.entries(o).map(([k,v])=>[k,SAFEK.has(k)?v:escD(v)])):o;
 let HX={fl:'all',m:0,t:null,q:''},AO=null,lkSeq=0,AU=null,FPA=false;
 async function srv(action,body){try{return await window.api(action,body||{})}catch(e){toast(e.message||'Request failed');throw e}}
 async function staffAct(type,b,name){if(SRV())return srv('staff',{type,...b}).then(r=>r.message&&toast(r.message)).catch(()=>{});
@@ -332,7 +350,7 @@ const NM={
  rejected:(t,c)=>['Update on your refund request',`${BANK}: Case ${c} was reviewed and a refund was not approved. Please contact support for details.`,`Hello, after reviewing case ${c} for your ${N(t.amt)} transfer, our accounts team could not approve a refund. If you think this is wrong, please contact customer support and quote the case number.`],
  nodebit:(t,c)=>['No money left your account',`${BANK}: Case ${c} closed. No debit was found for this ${N(t.amt)} transfer, so nothing needs refunding.`,`Hello, we checked case ${c} and found that your account was not debited for this ${N(t.amt)} transfer. Nothing needs to be refunded.`]};
 async function notify(to,t,cid,type){try{const m=NM[type](t,cid.slice(0,7)),id='N'+rid();await put('notifications',id,{id,uid:to,caseId:cid,txid:t.id||'',type,subject:m[0],sms:m[1],body:m[2],ts:Date.now(),read:false})}catch(e){}}
-const watchN=()=>db.collection('notifications').where('uid','==',uid).onSnapshot(s=>{const l=s.docs.map(d=>({id:d.id,...d.data()}));if(!s.metadata.fromCache){if(seenN)l.filter(x=>!seenN.has(x.id)).forEach(x=>toast('📩 '+x.subject));seenN=new Set(l.map(x=>x.id))}S.notifications=l;R()},hold);
+const watchN=()=>db.collection('notifications').where('uid','==',uid).onSnapshot(s=>{const l=s.docs.map(d=>escD({id:d.id,...d.data()}));if(!s.metadata.fromCache){if(seenN)l.filter(x=>!seenN.has(x.id)).forEach(x=>toast('📩 '+x.subject));seenN=new Set(l.map(x=>x.id))}S.notifications=l;R()},hold);
 const unread=()=>(S.notifications||[]).filter(x=>!x.read).length;
 function bell(){$('#who').innerHTML='';return;if(STAFF||!LD.users||!S.users.length){$('#who').innerHTML='';return}const n=unread();$('#who').innerHTML=`<button onclick="inbox('sms')">🔔 Messages${n?' <b style="color:var(--pr)">'+n+'</b>':''}</button>`}
 const rd=id=>{const n=(S.notifications||[]).find(x=>x.id===id);if(n&&!n.read)upd('notifications',id,{read:true})};
@@ -540,7 +558,7 @@ function staff(){const aw=S.cases.filter(c=>c.status==='awaiting').length;
  if(tab==='cu')h+=`<div class="card ov"><table class="tbl"><tr><th>Name</th><th>Email</th><th>Account</th><th>Tier</th><th>Balance</th><th>Cases</th><th>Actions</th></tr>${S.users.map(u=>`<tr><td>${u.name}</td><td>${u.email||''}</td><td>${u.acct}</td><td>${u.tier||1}</td><td>${N(u.bal)}</td><td>${S.cases.filter(c=>c.uid===u.id).length}</td><td style="white-space:nowrap"><button onclick="staffAct('freeze',{uid:'${u.id}',frozen:${!u.frozen}},'${u.frozen?'Unfroze':'Froze'} ${u.name}')">${u.frozen?'Unfreeze':'Freeze'}</button> <button onclick="acctM('adjust','${u.id}')">Adjust balance</button> <button onclick="acctM('delete','${u.id}')">Delete</button></td></tr>`).join('')}</table></div><div class="hint">Adjusting a balance or deleting an account needs a one-time code, emailed to the head accountant.</div><div style="margin-top:8px"><button onclick="staffAct('repair')">Repair account numbers</button> <span class="hint">Fixes older accounts so every number is 10 digits and can be found by name lookup.</span></div>`;
  if(tab==='en')h+=`<div class="card"><h3 style="margin-top:0">DT Engine v${CFG.version}</h3><div class="hint">Logistic confidence model: p = sigmoid(bias + Σ weight × evidence). Accountant decisions become training examples.</div>
   <table class="tbl"><tr><th>Bias</th>${DTEngine.FEATS.map(k=>`<th>w:${k}</th>`).join('')}<th>hi</th><th>lo</th><th>Trained on</th></tr><tr><td>${CFG.bias.toFixed(2)}</td>${DTEngine.FEATS.map(k=>`<td>${CFG.w[k].toFixed(2)}</td>`).join('')}<td>${CFG.hi}</td><td>${CFG.lo}</td><td>${CFG.trainedOn}</td></tr></table>
-  <p>Labelled examples available: <b>${S.examples.length}</b></p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="p" onclick="trainE()">Train on accountant decisions</button><button onclick="staffAct('reset')">Reset</button><button onclick="exportEngine()">Export engine (.js)</button></div></div>`;
+  <p>Labelled examples available: <b>${S.examples.length}</b></p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="p" onclick="trainE()">Train on accountant decisions</button><button onclick="staffAct('reset')">Reset</button><button onclick="staffAct('rollback')">Roll back last training</button><button onclick="exportEngine()">Export engine (.js)</button></div></div>`;
  if(tab==='dash')h+=dashT();if(tab==='tx')h+=txT();if(tab==='pat')h+=patT();if(tab==='rec')h+=recT();if(tab==='en')h+=engineExtra();if(tab==='au')h+=`<div class="card"><div class="log">${[...S.audit].sort((a,b)=>b.t-a.t).map(a=>`<div>[${D(a.t)}] ${a.m}</div>`).join('')||'No activity'}</div></div>`;return h}
 function caseM(id,keep){const c=S.cases.find(x=>x.id===id);if(!c)return;
  $('#mod').innerHTML=`<div class="modal" onclick="if(event.target==this)closeM()"><div><h3 style="margin:0 0 4px">Case ${c.id.slice(0,7)} ${st(c.status)}</h3><div class="mu">${c.uname} · ${N(c.amt)} · ${c.type==='auto'?'Auto-flagged':'Customer dispute'} · opened ${D(c.opened)}</div>
@@ -591,7 +609,7 @@ function recT(){let h=`<div class="card"><h3 style="margin-top:0">End-of-day rec
  if(!RW||!DTEngine.reconcile)return h;const RC=DTEngine.reconcile(RW,S.txs),s=RC.summary;
  return h+`<div class="card"><b>${s.rows}</b> rows checked · <b>${s.matched}</b> matched · <b style="color:${s.issues?'var(--pr)':'var(--ok)'}">${s.issues}</b> issues · <b>${s.unreported}</b> with no case opened yet</div>
  <div class="card ov"><table class="tbl"><tr><th>Issue</th><th>Ref</th><th>Customer</th><th>Amount</th><th>Case</th><th>Detail</th><th></th></tr>${RC.issues.map((x,i)=>`<tr><td><span class="tag s-failed">${KIND[x.kind]||x.kind}</span></td><td>${clean(x.ref)}</td><td>${x.uid?nm(x.uid):'—'}</td><td>${N(x.amount||0)}</td><td>${x.reported?'Yes':'<span class="mu">None</span>'}</td><td>${x.detail}</td><td>${ACT[x.action]&&x.txid?`<button onclick="reconAct(${i})">${ACT[x.action]}</button>`:''}</td></tr>`).join('')||'<tr><td colspan=7 class="mu">No issues found</td></tr>'}</table></div>`}
-async function trainE(){if(SRV())return staffAct('train');if(!S.examples.length)return toast('No decisions to learn from yet');const c=DTEngine.train(S.examples.map(e=>({f:e.f,y:e.y})),CFG);await put('engine','config',c);toast('DT Engine retrained on '+c.trainedOn+' examples (v'+c.version+')')}
+async function trainE(){if(SRV())return staffAct('train');if(!S.examples.length)return toast('No decisions to learn from yet');const c=DTEngine.train(S.examples.map(e=>({f:e.f,y:e.y})),CFG);if(c.guard&&!c.guard.ok)return toast('Retrain rejected: '+c.guard.reasons.join('; '));await put('engine','config',c);toast('DT Engine retrained on '+c.trainedOn+' examples (v'+c.version+')')}
 async function exportE(){const dl=await claude.use('downloads');if(!dl)return toast('Downloads unavailable');try{await dl.save({filename:'dt_engine.js.txt',data:document.getElementById('dt-engine').textContent+'\n/* current trained config: */\n/* '+JSON.stringify(CFG)+' */\nif(typeof module!=="undefined")module.exports=DTEngine;'});toast('Saved as dt_engine.js.txt. Rename it to dt_engine.js.')}catch(e){if(!e||e.code!=='declined')toast('Could not save the file ('+((e&&e.code)||'error')+')')}}
 setInterval(()=>{if(STAFF&&(tab==='cases'||tab==='dash')&&!cur)R()},30000);boot();
 </script></body></html>

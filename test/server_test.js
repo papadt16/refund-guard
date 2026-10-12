@@ -93,6 +93,14 @@ async function fund(uid, amt) { const r = await t(boss, { action: 'staff', type:
   await assert.rejects(t(nu, { action: 'transfer', kind: 'ins', rb: 'Leadway', ra: 'P1', amt: 2000 }), /characters/);
   x = await t(nu, { action: 'transfer', kind: 'momo', rb: 'OPay Wallet', ra: '08031234567', amt: 500, sim: 'ok' }); assert.equal(store['txs/' + x.txId].kind, 'momo');
   await assert.rejects(t(nu, { action: 'transfer', kind: 'momo', rb: 'Hack', ra: '08031234567', amt: 500 }), /provider/);
+  /* DT Engine safeguards */
+  const E = require('../engine/dt_engine.js'), tx0 = { id: 'x', uid: 'u', rb: 'OPay', amt: 5, ref: 'r', sess: 's', ts: 1, ra: '1', debited: true, sim: 'ok' };
+  let r2_ = await E.investigate(tx0, [], E.defaults(), () => {}, 0, { ...E.adapters, nip: () => ({ v: 1 }), beneficiary: () => ({ v: .5 }) }); assert.equal(r2_.verdict, 'review', 'no auto-correct on half the evidence');
+  r2_ = await E.investigate({ ...tx0, sim: 'ghost', status: 'refunded' }, [], E.defaults(), () => {}, 0); assert.notEqual(r2_.verdict, 'refund', 'an already-refunded transfer is not refunded twice');
+  await assert.rejects(t(boss, { action: 'staff', type: 'train' }), /at least 10/);
+  for (let i = 0; i < 12; i++) store['examples/e' + i] = { f: { core: 1, tsq: 0, ben: 0, rev: 0, dup: 0 }, y: 1, ts: i }; const tr = await t(boss, { action: 'staff', type: 'train' }); assert.match(tr.message, /retrained on 13/); assert.ok(store['engine/config'].prev);
+  const bad_ = []; for (let i = 0; i < 40; i++) bad_.push({ f: { core: 1, tsq: 1, ben: 1, rev: 0, dup: 0 }, y: 1 }); assert.equal(E.train(bad_, E.defaults()).guard.ok, false, 'biased retraining is rejected');
+  const v1 = store['engine/config'].version; await t(boss, { action: 'staff', type: 'rollback' }); assert.equal(store['engine/config'].version, v1 + 1);
   /* delete needs OTP, frees the account number, removes auth user */
   const d1 = { action: 'staff', type: 'delete', uid: 'u2', reason: 'closed' }, od = await t(boss, { ...d1, type: 'otp', op: 'delete' });
   await assert.rejects(t(boss, { ...d1, otpId: od.otpId, code: '111111' }), /Incorrect/); await t(boss, { ...d1, otpId: od.otpId, code: lastCode() });
